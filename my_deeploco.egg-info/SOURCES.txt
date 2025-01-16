@@ -1,0 +1,7 @@
+pyproject.toml
+setup.py
+my_deeploco/__init__.py
+my_deeploco.egg-info/PKG-INFO
+my_deeploco.egg-info/SOURCES.txt
+my_deeploco.egg-info/dependency_links.txt
+my_deeploco.egg-info/top_level.txt
