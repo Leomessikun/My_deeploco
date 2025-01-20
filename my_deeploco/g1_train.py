@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
-from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv 
+from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv 
 from g1_env import G1DeeplocoEnv
 from g1_gym_wrapper import G1DeeplocoGymWrapper 
 import genesis as gs
@@ -146,8 +146,9 @@ def main():
     # parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp_name", type=str, default="g1-deeploco")
-    parser.add_argument("-B", "--num_envs", type=int, default=4096)
-    parser.add_argument("--max_iterations", type=int, default=100)    
+    parser.add_argument("-B", "--num_envs", type=int, default=1024)
+    parser.add_argument("--max_iterations", type=int, default=100)
+    parser.add_argument("--device", type=str, default="cuda")    
     args = parser.parse_args()
 
     # intialize genesis
@@ -163,17 +164,22 @@ def main():
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
 
-    # save configurations
-    pickle.dump(
-        [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg],
-        open(f"{log_dir}/cfgs.pkl", "wb"),
-    )
+    # Save configurations
+    try:
+        pickle.dump(
+            [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg],
+            open(f"{log_dir}/cfgs.pkl", "wb"),
+        )
+        print(f"Configurations saved to {log_dir}/cfgs.pkl")
+    except Exception as e:
+        print(f"Failed to save configurations: {e}")
+        return
 
     # create vectorized environment
-    def make_env(num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg):
+    def make_env(env_cfg, obs_cfg, reward_cfg, command_cfg):
         def __init__():
             env = G1DeeplocoEnv(
-                num_envs=num_envs,
+                num_envs=1,
                 env_cfg=env_cfg,
                 obs_cfg=obs_cfg,
                 reward_cfg=reward_cfg,
@@ -184,40 +190,77 @@ def main():
 
         return __init__
     
-    env = DummyVecEnv([make_env(
-                num_envs=1, # each environment instance handles one environment
-                env_cfg=env_cfg,
-                obs_cfg=obs_cfg,
-                reward_cfg=reward_cfg,
-                command_cfg=command_cfg,
-            )for _ in range(args.num_envs)])
-    
-    env = VecNormalize(env, norm_obs=True, norm_reward=True)
+    try:
+        env = SubprocVecEnv([
+            make_env(env_cfg, obs_cfg, reward_cfg, command_cfg) for _ in range(args.num_envs)
+        ])
+        env = VecNormalize(env, norm_obs=True, norm_reward=True)
+        print("Environment created successfully.")
+    except Exception as e:
+        print(f"Failed to create environment: {e}")
+        return
 
-    # initialize ppo model
-    model = PPO(
-        "mlpPolicy",
+    # Initialize PPO model
+    try:
+        model = PPO(
+            "MlpPolicy",
+            env,
+            policy_kwargs=train_cfg["policy"],
+            learning_rate=train_cfg["algorithm"]["learning_rate"],
+            n_steps=train_cfg["algorithm"]["n_steps"],
+            batch_size=train_cfg["algorithm"]["batch_size"],
+            n_epochs=train_cfg["algorithm"]["n_epochs"],
+            gamma=train_cfg["algorithm"]["gamma"],
+            gae_lambda=train_cfg["algorithm"]["gae_lambda"],
+            clip_range=train_cfg["algorithm"]["clip_param"],
+            ent_coef=train_cfg["algorithm"]["entropy_coef"],
+            max_grad_norm=train_cfg["algorithm"]["max_grad_norm"],
+            verbose=1,
+            tensorboard_log=log_dir,
+            device=args.device,
+        )
+        print("PPO model initialized successfully.")
+    except Exception as e:
+        print(f"Failed to initialize PPO model: {e}")
+        return
+
+   # Set up callbacks
+    checkpoint_callback = CheckpointCallback(
+        save_freq=train_cfg["runner"]["save_interval"] * args.num_envs,
+        save_path=log_dir,
+        name_prefix="ppo_g1",
+    )
+    eval_callback = EvalCallback(
         env,
-        policy_kwargs=train_cfg["policy"],
-        learning_rate=train_cfg["algorithm"]["learning_rate"],
-        n_steps=train_cfg["algorithm"]["n_steps"],
-        batch_size=train_cfg["algorithm"]["batch_size"],
-        n_epochs=train_cfg["algorithm"]["n_epochs"],
-        gamma=train_cfg["algorithm"]["gamma"],
-        gae_lambda=train_cfg["algorithm"]["gae_lambda"],
-        clip_range=train_cfg["algorithm"]["clip_param"],
-        ent_coef=train_cfg["algorithm"]["entropy_coef"],
-        max_grad_norm=train_cfg["algorithm"]["max_grad_norm"],
-        verbose=1,
-        tensorboard_log=log_dir,
+        best_model_save_path=log_dir,
+        log_path=log_dir,
+        eval_freq=train_cfg["runner"]["save_interval"] * args.num_envs,
+        deterministic=True,
+        render=False,
     )
 
-    # train the model
-    model.learn(total_timesteps=train_cfg["runner"]["max_iterations"]*train_cfg["algorithm"]["n_steps"]*args.num_envs)
+    # Train the model
+    try:
+        model.learn(
+            total_timesteps=train_cfg["runner"]["max_iterations"] * train_cfg["algorithm"]["n_steps"] * args.num_envs,
+            callback=[checkpoint_callback, eval_callback],
+        )
+        print("Training completed successfully.")
+    except Exception as e:
+        print(f"Training failed: {e}")
+        return
+    
+   # Save the final model and normalization statistics
+    try:
+        model_save_path = f"{log_dir}/ppo_g1_final"
+        model.save(model_save_path)
+        print(f"Model saved to: {model_save_path}.zip")
 
-    # save the model
-    model.save(f"{log_dir}/ppo_g1")
-    env.save(f"{log_dir}/vec_normalize.pkl")
-
+        env_save_path = f"{log_dir}/vec_normalize_final.pkl"
+        env.save(env_save_path)
+        print(f"Normalization statistics saved to: {env_save_path}")
+    except Exception as e:
+        print(f"Failed to save final model or normalization: {e}")
+    
 if __name__ == "__main__":
     main()
