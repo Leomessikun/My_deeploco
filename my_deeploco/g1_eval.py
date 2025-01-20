@@ -2,8 +2,6 @@ import torch
 import os 
 import pickle
 import argparse
-
-import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from g1_env import G1DeeplocoEnv
@@ -24,14 +22,18 @@ def main():
     # define log directory
     log_dir = f"log/{args.exp_name}"
 
-    # load configuration 
-    env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"{log_dir}/cfgs.pkl", "rb"))
-
+   # Load configuration
+    try:
+        env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"{log_dir}/cfgs.pkl", "rb"))
+        print("Configurations loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load configurations: {e}")
+        return
+    
     # disable reward scales for evaluation 
     reward_cfg["reward_scales"] = {}
 
     # create the environment
-     # Create the environment
     def make_env(num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg):
         def _init():
             env = G1DeeplocoEnv(
@@ -46,42 +48,53 @@ def main():
             return G1DeeplocoGymWrapper(env)
         return _init
 
-    env = VecNormalize(
-        DummyVecEnv([
-            make_env(
-                num_envs=1,  # Each environment instance handles one environment
-                env_cfg=env_cfg,
-                obs_cfg=obs_cfg,
-                reward_cfg=reward_cfg,
-                command_cfg=command_cfg,
-            )
-        ]),
-        norm_obs=True,
-        norm_reward=True,
-    )
+    env = DummyVecEnv([
+        make_env(env_cfg,obs_cfg,reward_cfg,command_cfg)
+        ])
+    
+    env = VecNormalize(env, norm_obs=True, norm_reward=True)
+
+    # load normalized statistics
+    env_save_path = os.path.join(log_dir, "vec_normalize_final.pkl")
+    try: 
+        env = VecNormalize.load(env_save_path, env)
+        print(f"Normalization statistics loaded from {env_save_path}.")
+    except Exception as e:
+        print(f"Failed to load normalization statistics: {e}")
+        return
 
     # load the trained model
-    model_path = os.path.join(log_dir, f"ppo_g1_{args.ckpt}.zip")
-    model = PPO.load(model_path, env=env, device="cuda") 
+    model_path = os.path.join(log_dir, "ppo_g1_final")
+    try:
+        model = PPO.load(model_path, env=env, device="cuda")
+        print(f"Model loaded successfully from {model_path}.")
+    except Exception as e:
+        print(f"Failed to load model: {e}")
+        return
 
     # reset the environment
     obs = env.reset()
 
-    # run the simulation 
-    with torch.no_grad():
-        while True:
-            # get actions from the policy
-            actions, _ = model.predict(obs, deterministic=True)
+   # Run the simulation
+    try:
+        with torch.no_grad():
+            while True:
+                # Get actions from the policy
+                actions, _ = model.predict(obs, deterministic=True)
 
-            # step the enviroment
-            obs, rewards, done, infos = env.step(actions)
+                # Step the environment
+                obs, rewards, done, infos = env.step(actions)
 
-            # render the environment (if visualization is enabled)
-            env.render()
+                # Render the environment (if visualization is enabled)
+                env.render()
 
-            # check for termination 
-            if done.any():
-                obs=env.reset()
+                # Check for termination
+                if done.any():
+                    obs = env.reset()
+    except KeyboardInterrupt:
+        print("Simulation interrupted by user.")
+    finally:
+        env.close()
 
 if __name__ == "__main__":
     main()
