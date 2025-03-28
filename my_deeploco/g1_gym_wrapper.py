@@ -19,7 +19,7 @@ class G1DeeplocoGymWrapper(gym.Env):
         self. observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.genesis_env.num_obs,), # observation dimension
+            shape=(100,), # observation dimension
             dtype=np.float32
         )
         
@@ -44,7 +44,7 @@ class G1DeeplocoGymWrapper(gym.Env):
         """
 
         # reset the genesis environment
-        obs_buf, _, _, _, _ = self.genesis_env.reset()
+        obs_buf= self.genesis_env.reset()
 
         # convert observation to numpy array
         obs = obs_buf.cpu().numpy()
@@ -72,19 +72,16 @@ class G1DeeplocoGymWrapper(gym.Env):
             action = torch.tensor(action, device=self.genesis_env.device, dtype=torch.float32)
 
         # perform the step in the genesis environment
-        obs_buf, _, rew_buf, reset_buf, extras = self.genesis_env.step(action)
-
-        # convert outputs to numpy arrays
+        obs_buf, rew_buf, reset_buf, extras = self.genesis_env.step(action)
         obs = obs_buf.cpu().numpy()
-        reward = rew_buf.cpu().numpy().item() # assuming single environment
-        done = reset_buf.cpu().numpy().item() # assuming single environment 
-        info = extras
+        rewards = rew_buf.cpu().numpy()
+        terminated = reset_buf.cpu().numpy()
+        truncated = np.zeros_like(terminated)
+        infos = extras
 
         # return observation, reward, done, truncated, and info
-        return obs, reward, done, False, info
+        return obs, rewards, terminated, truncated, infos
     
     def close(self):
-        """
-        clean up the environment.
-        """
+        """Clean up the environment."""
         self.genesis_env.close()
