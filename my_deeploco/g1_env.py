@@ -1,495 +1,332 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
-import genesis as gs
-from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
 import numpy as np
-
- # Highlevel Policy
-class HighLevelPolicy:
-        def __init__(self, num_envs, state_dim, action_dim, hidden_dim=256, num_layers=2, device="cuda"):
-            """
-            High-level controller for generating intermediate goals.
-
-            Args:
-                num_envs (int): Number of parallel environments.
-                state_dim (int): Dimension of the state space.
-                action_dim (int): Dimension of the action space (goals).
-                hidden_dim (int): Number of hidden units in each layer.
-                num_layers (int): Number of hidden layers.
-                device (str): Device for computation (e.g., "cuda" or "cpu").
-            """
-
-            self.device = torch.device(device)
-            self.state_dim = state_dim
-            self.action_dim = action_dim
-
-            # define the policy network
-            layers = []
-            layers.append(nn.Linear(state_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            for _ in range(num_layers - 1):
-                layers.append(nn.Linear(hidden_dim, hidden_dim))
-                layers.append(nn.ReLU())
-            layers.append(nn.Linear(hidden_dim, action_dim))
-            self.policy_net = nn.Sequential(*layers).to(self.device)
-
-        def act(self, state):
-            """
-            Generate high-level actions (intermediate goals) based on state.
-
-            Args: 
-                state(np.ndarray or torch.Tensor): Current state of the environment.
-
-            Returns:
-                np.ndarray: High-level actions(goals).
-            """
-
-            if not isinstance(state, torch.Tensor):
-                state = torch.tensor(state, device=self.device, dtype=torch.float32)
-            else:
-                state = state.to(self.device)
-
-            with torch.no_grad():
-                action = self.policy_net(state)
-
-            return action.cpu().numpy()
-        
-# LowLevelController:
-class LowLevelController:
-        def __init__(self, num_envs, state_dim, action_dim, goal_dim, hidden_dim=256, num_layers=2, device="cuda"):
-            """
-            Low-level controller for generating fine-grained actions.
-
-            Args:
-                num_envs (int): Number of parallel environments.
-                state_dim (int): Dimension of the state space.
-                action_dim (int): Dimension of the action space (goals).
-                goal_dim(int): Dimension of the goal space.
-                hidden_dim (int): Number of hidden units in each layer.
-                num_layers (int): Number of hidden layers.
-                device (str): Device for computation (e.g., "cuda" or "cpu").
-            """
-            
-            self.num_envs = num_envs
-            self.device = torch.device(device)
-            self.state_dim = state_dim
-            self.action_dim = action_dim
-            self.goal_dim = goal_dim
-            
-            # define the policy network 
-            layers = []
-            layers.append(nn.Linear(state_dim + goal_dim, hidden_dim)) # input layer
-            layers.append(nn.ReLU())
-            for _ in range(num_layers - 1):
-                layers.append(nn.Linear(hidden_dim, hidden_dim)) # hidden layer 
-                layers.append(nn.ReLU())
-            layers.append(nn.Linear(hidden_dim, action_dim)) # output layer
-            self.policy_net = nn.Sequential(*layers).to(self.device)
-
-        def act(self, state, goal):
-            """
-            Generate fine-grained actions to achieve the goal.
-
-            Args: 
-                state(np.ndarray or torch.Tensor): Current state of the environment.
-                goal(np.ndarray or torch.Tensor): High-level goal.
-
-            Returns:
-                np.ndarray: Low-level actions.
-            """
-
-            if not isinstance(state, torch.Tensor):
-                state = torch.tensor(state, device=self.device, dtype=torch.float32)
-            else:
-                state = state.to(self.device)
-
-            if not isinstance(goal, torch.Tensor):
-                goal = torch.tensor(goal, device=self.device, dtype=torch.float32)
-            else:
-                goal = goal.to(self.device)
-
-            # combine state and goal
-            input_data = torch.cat([state, goal], dim=-1)
-
-            with torch.no_grad():
-                action = self.policy_net(input_data)
-
-            return action.cpu().numpy()
+import genesis as gs
+from genesis.utils.geom import quat_to_xyz, xyz_to_quat, transform_by_quat, inv_quat, transform_quat_by_quat
 
 def gs_rand_float(lower, upper, shape, device):
-    """
-    generate random numbers in the range [lower, uppper) using pytorch.
-
-    Args: 
-        lower(float): Lower bound of the range.
-        upper(float): Upper bound of the range.
-        shape(tuple): Shape of the output tensor.
-        device(torch.device): Device for the output tensor.
-
-    Returns:
-        torch.Tensor: Random numbers in the range [lower, upper).
-    """
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
 
-
 class G1DeeplocoEnv:
-    def __init__ (self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, device="cuda" ):
-        """
-        Initialize the G1 Deeploco environment.
-
-        Args: 
-            num_envs(int): Number of parallel environments
-            env_cfg(dict): Configuration for the environment(e.g. episode length, control parameters).
-            obs_cfg(dict): Configuration for the observation space.
-            reward_config(dict): Configuration for reward  functions.
-            command_cfg(dict): Configuration for command sampling.
-            show_viewer(bool): Whether to show the simulation viewer.
-            device(str): Device for tensor computation(e.g., "cuda" or "cpu").
-        """
-
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, domain_rand_cfg, show_viewer=True, device="cuda"):
         self.device = torch.device(device)
-
         self.num_envs = num_envs
         self.num_obs = obs_cfg["num_obs"]
-        self.num_actions = env_cfg["num_actions"]
-        self.num_command = command_cfg["num_commands"]
+        self.num_privileged_obs = None
+        # Use env_cfg["num_actions"] if defined, otherwise infer from number of dof_names.
+        self.num_actions = env_cfg.get("num_actions", len(env_cfg["dof_names"]))
+        self.num_commands = command_cfg["num_commands"]
 
-        self.dt = 0.02 # control frequency(50 Hz)
-        self.max_episode_length = math.ceil(env_cfg ["episode_length_s"] / self.dt)
-        
+        # Set simulation parameters 
+        self.simulate_action_latency = env_cfg.get("simulation_action_latency", False) #(Sim2Sim mode)
+        self.dt = 0.02  # 50Hz control frequency
+        self.max_episode_length = math.ceil(env_cfg["episode_length_s"] / self.dt)
+
         self.env_cfg = env_cfg
         self.obs_cfg = obs_cfg
         self.reward_cfg = reward_cfg
         self.command_cfg = command_cfg
-        self.show_viewer = show_viewer
+        self.domain_rand_cfg = domain_rand_cfg
 
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = reward_cfg["reward_scales"]
         
-        self.torques = torch.zeros((num_envs, self.num_actions), device=device)
-        self.actions = torch.zeros((num_envs, self.num_actions), device=device)
+        # Multiply reward scales by dt 
+        for key in self.reward_scales.keys():
+            self.reward_scales[key] *= self.dt
 
-        # create scene
+        # Create scene 
         self.scene = gs.Scene(
-            sim_options= gs.options.SimOptions(dt=self.dt, substeps=2),
-            viewer_options= gs.options.ViewerOptions(
-                max_FPS= int(0.5 / self.dt),
-                camera_pos= (2.0, 0.0, 2.5),
-                camera_lookat= (0.0, 0.0, 0.5),
-                camera_fov= 40,
+            sim_options=gs.options.SimOptions(dt=self.dt, substeps=1),
+            viewer_options=gs.options.ViewerOptions(
+                max_FPS=int(0.5 / self.dt),
+                camera_pos=(2.0, 0.0, 2.5),
+                camera_lookat=(0.0, 0.0, 0.5),
+                camera_fov=40,
             ),
-            vis_options= gs.options.VisOptions(n_rendered_envs=1),
-            rigid_options= gs.options.RigidOptions(
-                dt= self.dt,
-                constraint_solver= gs.constraint_solver.Newton,
-                enable_collision= True,
-                enable_joint_limit= True,
+            vis_options=gs.options.VisOptions(n_rendered_envs=1),
+            rigid_options=gs.options.RigidOptions(
+                dt=self.dt,
+                constraint_solver=gs.constraint_solver.Newton,
+                enable_collision=True,
+                enable_self_collision=True,
+                enable_joint_limit=True,
             ),
-            show_viewer= show_viewer,
+            show_viewer=show_viewer,
         )
-
-        # add plane 
-        self.scene.add_entity(gs.morphs.URDF(file='urdf/plane/plane.urdf', fixed=True))
-
-        # add G1 robot
-        self.base_init_pos= torch.tensor(self.env_cfg["base_init_pos"], device=self.device)
-        self.base_init_quat= torch.tensor(self.env_cfg["base_init_quat"], device=self.device)
-        self.inv_base_int_quat= inv_quat(self.base_init_quat)
-        self.robot= self.scene.add_entity(
+        # Add plane
+        self.plane = self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+        
+        # Add robot – note the URDF file has been changed for g1
+        self.base_init_pos = torch.tensor(env_cfg["base_init_pos"], device=self.device)
+        self.base_init_quat = torch.tensor(env_cfg["base_init_quat"], device=self.device)
+        self.inv_base_init_quat = inv_quat(self.base_init_quat)
+        self.robot = self.scene.add_entity(
             gs.morphs.URDF(
-                file="/home/kuntao/Desktop/My_deeploco/my_deeploco/urdf/g1_29dof.urdf",
-                pos= self.base_init_pos.cpu().numpy(),
-                quat= self.base_init_quat.cpu().numpy(),
-            ),
+                file="/home/dodolab/tkworkspace/My_deeploco/my_deeploco/urdf/g1_12dof.urdf",
+                pos=self.base_init_pos.cpu().numpy(),
+                quat=self.base_init_quat.cpu().numpy(),
+            )
         )
-
-        # build scene
         self.scene.build(n_envs=num_envs)
 
-        # names to indices
-        self.motor_dofs= [self.robot.get_joint(name).dof_idx_local for name in self.env_cfg["dof_names"]]
-
-        # PD control parameters
-        self.robot.set_dofs_kp([self.env_cfg["kp"]]* self.num_actions, self.motor_dofs)
-        self.robot.set_dofs_kv([self.env_cfg["kd"]]* self.num_actions, self.motor_dofs)
-
-        # prepare reward functions
-        self.reward_functions, self.episode_sum = dict(), dict()
-        for name in self.reward_scales.keys():
-            self.reward_scales[name] *= self.dt
-            self.reward_functions[name] = getattr(self, "_reward_"+ name)
-            self.episode_sum[name] = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_float)
-
-        # initialize buffers
-        self._initialize_buffers()
-
-        # initialize controllers
-        state_dim = self.num_obs
-        goal_dim = 6 # example: desired COM velocity, torso orientation
-        action_dim = self.num_actions # dimension of the action space
-
-        # Debugging: Print the values of state_dim, action_dim, and goal_dim
-        print(f"state_dim: {state_dim}, action_dim: {action_dim}, goal_dim: {goal_dim}")
-
-        self.high_level_controller = HighLevelPolicy(num_envs, state_dim, goal_dim, device=device)
-        self.low_level_controller = LowLevelController(
-            num_envs=num_envs, 
-            state_dim=state_dim, 
-            action_dim=action_dim, 
-            goal_dim=goal_dim, 
-            device=device
+        # Map joint names to motor indices and set default positions
+        self.motor_dofs = [self.robot.get_joint(name).dof_idx_local for name in env_cfg["dof_names"]]
+        self.default_dof_pos = torch.tensor(
+            [env_cfg["default_joint_angles"][name] for name in env_cfg["dof_names"]],
+            device=self.device, dtype=gs.tc_float
         )
 
-        """self.command_cfg = {
-            "lin_vel_x_range" : [0.5, 1.5], # desired forward velocity (vx) in m/s
-            "lin_vel_y_range" : [-0.2, 0.2], # desired lateral velocity (vy) in m/s
-            "ang_vel_yaw_range": [-0.5, 0.5], # desired yaw velocity (wz) in rad/s
-            "gait_mode_range": [0, 2], # gait modes : 0 = walk, 1 = run, 2 = turn
-            "locomotion_param_range": [0.1, 0.3], # additional parameters (e.g. step height in meters)
-        } """ 
+        # Set PD gains (position control) 
+        self.robot.set_dofs_kp([env_cfg["kp"]] * self.num_actions, self.motor_dofs)
+        self.robot.set_dofs_kv([env_cfg["kd"]] * self.num_actions, self.motor_dofs)
 
-    def _resample_commands(self, envs_idx):
-        """resample commands for specified environments.
-        commands include desired linear velocities(vx, vy), angular velocity(wz), and gait modes.
+        # Prepare reward functions and episode statistics
+        self.reward_functions = {name: getattr(self, "_reward_" + name) for name in self.reward_scales.keys()}
+        self.episode_sums = {key: torch.zeros(num_envs, device=self.device, dtype=gs.tc_float) for key in self.reward_scales}
 
-        Args:
-            envs_idx(torch.Tensor): Indices of envirnments to resample commands for.
-        """
-
-        # resample linear velocities (vx, vy) in the robot's local frame
-        self.commands[envs_idx, 0] = gs_rand_float(
-            # vx (forward velocity)
-            self.command_cfg["lin_vel_x_range"][0],
-            self.command_cfg["lin_vel_x_range"][1],
-            (len(envs_idx),),
-            self.device,
-        )
-
-        self.commands[envs_idx, 1] = gs_rand_float(
-            # vy (lateral velocity)
-            self.command_cfg["lin_vel_x_range"][0],
-            self.command_cfg["lin_vel_x_range"][1],
-            (len(envs_idx),),
-            self.device,
-        )
-
-        self.commands[envs_idx, 2] = gs_rand_float(
-            # wz (yaw velocity)
-            self.command_cfg["lin_vel_x_range"][0],
-            self.command_cfg["lin_vel_x_range"][1],
-            (len(envs_idx),),
-            self.device,
-        )
-
-        # resample gait modes(e.g., walk, run, turn)
-        if "gait_mode_range" in self.command_cfg:
-            gait_modes = torch.randint(
-                self.command_cfg["gait_mode_range"][0],
-                self.command_cfg["gait_mode_range"][1] + 1, # inclusive range
-                (len(envs_idx),),
-                device = self.device
-            )
-            self.command[envs_idx, 3] = gait_modes # assign gait modes to command buffer 
-
-        # resample additional locomotion parameters (e.g., step height, stride length)
-        if "locomotion_param_range" in self.command_cfg:
-            self.command[envs_idx, 4:] = gs_rand_float(
-                self.command_cfg["locomotion_param_range"][0],
-                self.command_cfg["locomotion_param_range"][1],
-                (len(envs_idx), self.num_commands -4), # adjust based on the number of additional parameters
-                self.device,
-            )
-
-    def _initialize_buffers(self):
-        """initialize tensors for observations, rewards, and other buffers."""
-        self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device)
-        self.base_lin_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
-        self.base_ang_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
-        self.projected_gravity = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
-        self.global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=gs.tc_float).repeat(self.num_envs, 1)
-        self.obs_buf = torch.zeros((self.num_envs, self.num_obs), device=self.device, dtype=gs.tc_float)
-        self.rew_buf = torch.zeros((self.num_envs, ), device=self.device, dtype=gs.tc_float)
-        self.rest_buf = torch.zeros((self.num_envs, ), device=self.device, dtype=gs.tc_float)
-        self.episode_length_buf = torch.zeros((self.num_envs, ), device=self.device, dtype=gs.tc_float)
-        self.commands = torch.zeros((self.num_envs, self.num_command), device=self.device, dtype=gs.tc_float)
+        # Initialize buffers
+        self.base_lin_vel = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_ang_vel = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.projected_gravity = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=gs.tc_float).repeat(num_envs, 1)
+        self.obs_buf = torch.zeros((num_envs, self.num_obs), device=self.device, dtype=gs.tc_float)
+        self.rew_buf = torch.zeros((num_envs,), device=self.device, dtype=gs.tc_float)
+        self.reset_buf = torch.ones((num_envs,), device=self.device, dtype=gs.tc_int)
+        self.episode_length_buf = torch.zeros((num_envs,), device=self.device, dtype=gs.tc_int)
+        self.commands = torch.zeros((num_envs, self.num_commands), device=self.device, dtype=gs.tc_float)
         self.commands_scale = torch.tensor(
-            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"]],
-            device = self.device,
-            dtype = gs.tc_float,
+            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"], self.obs_scales["heading"]],
+            device=self.device, dtype=gs.tc_float,
         )
-        #self.num_actions = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=gs.tc_float)
+        self.actions = torch.zeros((num_envs, self.num_actions), device=self.device, dtype=gs.tc_float)
         self.last_actions = torch.zeros_like(self.actions)
         self.dof_pos = torch.zeros_like(self.actions)
         self.dof_vel = torch.zeros_like(self.actions)
-        self.last_dof_vel = torch.zeros_like(self.actions)
-        self.base_pos = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
-        self.base_quat = torch.zeros((self.num_envs, 4), device=self.device, dtype=gs.tc_float)
-        self.default_dof_pos = torch.tensor(
-            [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["dof_names"]],
-            device=self.device,
-            dtype=gs.tc_float,
-        )
-        self.extras = dict() # extra information for logging
+        self.base_pos = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_quat = torch.zeros((num_envs, 4), device=self.device, dtype=gs.tc_float)
+        self.extras = dict()
 
-    def step(self, action):
-        """
-        Advance the simulation by one step.
-
-        Args:
-            actions (torch.Tensor): Actions for all environments.
-
-        Returns:
-            obs_buf (torch:Tensor): Obsercations after the step.
-            None: Placeholder for into dictionary.
-            rew_buf(torch.Tensor): Rewards for step.
-            reset_buf(torch.Tensor): Reset flags for environments.
-            extra(dict): Additional info for debugging or logging.
-        """
-
-        # generate high-level goals
-        state = self.obs_buf # current state 
-        goals = self.high_level_controller.act(state)
-
-        # generate low-level actions
-        actions = self.low_level_controller.act(state, goals)
-
-        # apply actions
-        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
-        target_dof_pos = self.actions * self.env_cfg["action_scale"] + self.default_dof_pos
+        # Modified physics and foot contact parameters 
+        self.contact_forces = self.robot.get_links_net_contact_force()
+        self.left_foot_link = self.robot.get_link(name='left_ankle_roll_link')
+        self.right_foot_link = self.robot.get_link(name='right_ankle_roll_link')
+        self.left_foot_id_local = self.left_foot_link.idx_local
+        self.right_foot_id_local = self.right_foot_link.idx_local
+        self.feet_indices = [self.left_foot_id_local, self.right_foot_id_local]
+        self.feet_num = len(self.feet_indices)
+        self.links_vel = self.robot.get_links_vel()
+        self.feet_vel = self.links_vel[:, self.feet_indices, :]
+        self.links_pos = self.robot.get_links_pos()
+        self.feet_pos = self.links_pos[:, self.feet_indices, :]
+        self.links_quat = self.robot.get_links_quat()
+        self.feet_quat = self.links_quat[:, self.feet_indices, :]
+        self.feet_quat_euler = quat_to_xyz(self.feet_quat)
         
-        # compute torques using PD control
-        self.torques = self.compute_torques(actions)
+        # Reference feet euler 
+        self.feet_quat_euler_ref = torch.tensor([[90, 0, 0], [-90, 0, 0]], device=self.device, dtype=gs.tc_float)
+        self.feet_quat_euler_ref = self.feet_quat_euler_ref.repeat(num_envs, 1, 1)
+        period = 1.0  # Increased period for more natural gait timing
+        offset = 0.5
+        self.phase = (self.episode_length_buf * self.dt) % period / period
+        self.phase_left = self.phase 
+        self.phase_right = (self.phase + offset) % 1
+        self.leg_phase = torch.cat([self.phase_left.unsqueeze(1), self.phase_right.unsqueeze(1)], dim=-1)
+        self.sin_phase = torch.sin(2 * np.pi * self.phase).unsqueeze(1)
+        self.cos_phase = torch.cos(2 * np.pi * self.phase).unsqueeze(1)
+        self.pelvis_link = self.robot.get_link(name='pelvis')
+        self.pelvis_mass = self.pelvis_link.get_mass()
+        self.pelvis_id_local = self.pelvis_link.idx_local
+        self.links_pos = self.robot.get_links_pos()  # Critical!
+        self.pelvis_pos = self.links_pos[:, self.pelvis_id_local, :]
+        self.original_links_mass = []
+        self.command_ranges = command_cfg["ranges"]  # Store ranges
+        self.heading_command = command_cfg["heading_command"]  # Store flag
+        self.curriculum = command_cfg.get("curriculum", False)
+        self.curriculum_steps = command_cfg.get("curriculum_steps", 10000)
+        self.counter = 0
 
-        # set DOF position using genesis API
+        self.knee_indices = [3, 8]
+
+        # Design of curriculum
+        self.curriculum_steps = self.command_cfg.get("curriculum_steps", 10000)
+        self.counter = 0  # Tracks the number of steps
+
+        termination_contact_names = env_cfg["terminate_after_contacts_on"]
+        self.termination_contact_indices = []
+        for name in termination_contact_names:
+            link = self.robot.get_link(name)
+            self.termination_contact_indices.append(link.idx_local)
+
+    def _resample_commands(self, envs_idx):
+        # Check if we're in the initial phase
+        in_initial_phase = self.counter < self.command_cfg.get("initial_steps", 0)
+        
+        if in_initial_phase:
+            # Use simpler initial ranges
+            ranges = self.command_cfg["initial_ranges"]
+            c = 1.0  # No scaling in initial phase
+        else:
+            # Use regular curriculum
+            ranges = self.command_cfg["ranges"]
+            if self.command_cfg.get("curriculum", False):
+                # Calculate curriculum progress after initial phase
+                progress = max(0, self.counter - self.command_cfg.get("initial_steps", 0))
+                c = min(self.command_cfg["max_curriculum"], progress / self.command_cfg["curriculum_steps"])
+            else:
+                c = self.command_cfg["max_curriculum"]
+
+        # Sample commands with appropriate ranges
+        self.commands[envs_idx, 0] = gs_rand_float(
+            ranges["lin_vel_x"][0],
+            c * ranges["lin_vel_x"][1],
+            (len(envs_idx),),
+            self.device
+        )
+        self.commands[envs_idx, 1] = gs_rand_float(
+            c * ranges["lin_vel_y"][0],
+            c * ranges["lin_vel_y"][1],
+            (len(envs_idx),),
+            self.device
+        )
+        self.commands[envs_idx, 2] = gs_rand_float(
+            c * ranges["ang_vel_yaw"][0],
+            c * ranges["ang_vel_yaw"][1],
+            (len(envs_idx),),
+            self.device
+        )
+        self.commands[envs_idx, 3] = gs_rand_float(
+            c * ranges["heading"][0],
+            c * ranges["heading"][1],
+            (len(envs_idx),),
+            self.device
+        )
+    def step(self, actions):
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.last_actions if self.simulate_action_latency else self.actions
+        target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos        
         self.robot.control_dofs_position(target_dof_pos, self.motor_dofs)
         self.scene.step()
 
-        """update buffers"""
-        # incement the episode length buffer for all environments by 1, tracking how many steps eacn environment has taken in the current episode.
-        self.episode_length_buf += 1 
-
-        # updates the position of the robot's base (typically the root or torso of the robot) in the world frame
+        # Update buffer
+        self.episode_length_buf += 1
         self.base_pos[:] = self.robot.get_pos()
 
-        # updates the orientation of the robot's base in the world frame as quaternion.
+        # if it gets NaN values in self.robot.get_*()
+        if torch.isnan(self.base_pos).any():
+            nan_envs = torch.isnan(self.base_pos).any(dim=1).nonzero(as_tuple=False).flatten()
+            self.reset_idx(nan_envs)
         self.base_quat[:] = self.robot.get_quat()
-
-        # convers the base quaternion into euler angles(roll, pitch, yaw) for easier interpolation and calculations.
-        """
-        transform_quat_by_quat:combines the current base quaternion,
-        (self.base_quat) with the inverse of the initial base quaternion,(self.inv_base_int_quat) 
-        this transforms the orientation relative to the initial state
-        quat_to_xyz: converts the resulting quaternion into euler angles(roll, pitch, yaw)
-        """
         self.base_euler = quat_to_xyz(
-            transform_quat_by_quat(torch.ones_like(self.base_quat)*self.inv_base_int_quat, self.base_quat)
+            transform_quat_by_quat(torch.ones_like(self.base_quat) * self.inv_base_init_quat, self.base_quat)
         )
 
-        # computes the inverse (conjugate) of the current base quaternion, this is used to transform vectors from the world frame into the robot's local frame.
         inv_base_quat = inv_quat(self.base_quat)
-
-        # transforms the robot's base linear velocity (in the world frame ) into the robot's local frame using the inverse base quaternion. This allows the linear velocity to be expressed relative to the robot's orientation.
         self.base_lin_vel[:] = transform_by_quat(self.robot.get_vel(), inv_base_quat)
-
-        # transforms the robot's angular velocity (in the world frame) into the local frame, useful for understanding the rotational dynamics relative to the robot's orientation.
         self.base_ang_vel[:] = transform_by_quat(self.robot.get_ang(), inv_base_quat)
-        
-        # projects the global gravity vector (typically [0,0,-1] in the world frame) into the robot's local frame, helps the controller understand the effect of the gravity relative to the robot's current orientation.
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
-
         self.dof_pos[:] = self.robot.get_dofs_position(self.motor_dofs)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motor_dofs)
-
-        # resample commands
-        """
-        determines which environments within a parallelized simulation need to have their commands resampled
         
-        (self.episode_length_buf % int (self.env_cfg["resampling_time_s"] / self.dt) == 0)
-        identifies environments where the current simulation step is a multiple of the resampling interval
-
-        key components: 
-            self.episode_length_buf: A buffer that tracks the number of steps each environment has take in the current episode.
-            self.env_cfg["resampling_time_s"]: The duration(in seconds) after which commands should be resampled.
-            self.dt: the time step of the simulation
-            self.env_cfg["resampling_time_s"] / self.dt: Converts the resampling time from seconds into the corresponding number of simulation steps.
-            self.episode_length_buf % ... == 0: Checks if the current step count for an environment is a multiple of the resampling interval, indicating it's time to resample.
-        """
-        envs_idx = (
-            (self.episode_length_buf % int (self.env_cfg["resampling_time_s"] / self.dt) == 0)
-            .nonzero(as_tuple=False) # as_tuple = False, ensures the result is returned as a 2D tensor(with each row containing and index), rather than a tuple. 
-            .flatten() 
-        )
+        # Resample commands
+        envs_idx = ((self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt)) == 0).nonzero(as_tuple=False).flatten()
         self._resample_commands(envs_idx)
-
-        # check termination and reset
-        """
-        self.reset_buf = self.episode_length_buf > self.max_episode_length : reset environment where the episode has exceeded the maximum allowed length.
-        self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]  : Adds a reset based on the robot's pitch angle.
-        ... : adds a reset condition based on the robot's roll angle.
-
-        |= : for result , environment where the pitch/roll exceeds the threshold are added to the reset buffer using the biwise OR assignment
-
-        """
+        
+        # Check termination and reset
+        self.links_pos = self.robot.get_links_pos()  # Critical!
+        self.pelvis_pos = self.links_pos[:, self.pelvis_id_local, :]
         self.reset_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]
-        self.reset_buf |= torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]
-
-        """
-        time_out_idx = (self.episode_length_buf > self.max_episode_length). nonzero(as_tuple=False).flatten() : identifies which environments have exceeded the maximum episode length(timed out)
+        self.reset_buf |= self.pelvis_pos[:, 2] < self.env_cfg["termination_if_pelvis_z_less_than"]
         
-        self.extras["time_outs"] = torch.zeros_like(self.reset_buf, device=self.device, dtype=gs.tc_float) : initializes a tensor to track timeouts for each environment.
-        
-        self.extras["time_outs"][time_out_idx] = 1.0 : marks environments that timed out by setting their corresponding indices in self.extras["time_outs"] to 1.0.
-        
-        self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten()) : resets the environments that need to be reset.
-        """
-        time_out_idx = (self.episode_length_buf > self.max_episode_length). nonzero(as_tuple=False).flatten()
+        time_out_idx = (self.episode_length_buf > self.max_episode_length).nonzero(as_tuple=False).flatten()
         self.extras["time_outs"] = torch.zeros_like(self.reset_buf, device=self.device, dtype=gs.tc_float)
         self.extras["time_outs"][time_out_idx] = 1.0
+        
         self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())
-
-        # compute reward 
+        
+        # Domain randomization (triggered only at specified intervals)
+        if self.domain_rand_cfg.get('randomize_friction', False) and self.counter % int(self.domain_rand_cfg['push_interval_s']/self.dt) == 0:
+            self.randomize_friction()
+        if self.domain_rand_cfg.get('randomize_mass', False) and self.counter % int(self.domain_rand_cfg['push_interval_s']/self.dt) == 0:
+            self.randomize_mass()
+        if self.domain_rand_cfg.get('push_robots', False):
+            self.push_robots()
+        
+        # Compute reward
         self.rew_buf[:] = 0.0
         for name, reward_func in self.reward_functions.items():
             rew = reward_func() * self.reward_scales[name]
             self.rew_buf += rew
             self.episode_sums[name] += rew
-
-        # compute observations
-        self.obs_buf = torch.cat(
-            [
-                self.base_ang_vel * self.obs_scales["ang_vel"], #3
-                self.projected_gravity, #3
-                self.commands * self.commands_scale, #3 (linear x, linear y, angular yaw), adjust if you include additional commands, like desired torso height or heading.
-                (self.dof_vel - self.default_dof_pos) * self.obs_scales["dof_pos"], #29 
-                self.dof_vel * self.obs_scales["dof_vel"], #29 
-                self.actions, #29
-            ],
-            axis = -1,
-        )
-
+        
+        # Compute observations
+        self.obs_buf = torch.cat([
+            self.base_ang_vel * self.obs_scales["ang_vel"],
+            self.projected_gravity,
+            self.commands * self.commands_scale,
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],
+            self.dof_vel * self.obs_scales["dof_vel"],
+            self.actions,
+            self.sin_phase,
+            self.cos_phase,
+        ], axis=-1)
+        
+        self.obs_buf = torch.clip(self.obs_buf, -self.env_cfg["clip_observations"], self.env_cfg["clip_observations"])
         self.last_actions[:] = self.actions[:]
-        self.last_dof_vel[:] = self.dof_vel[:]
-
-        # for clearance
-        """
-         # Convert rewards and done to scalars for Stable-Baselines3
-        reward = float(np.mean(self.rew_buf.cpu().numpy()))  # Mean reward across environments
-        done = self.reset_buf.any().item()  # Whether any environment has terminated
-        info = self.extras  # Additional info
-
-        """
+        self.counter += 1
 
         return self.obs_buf, None, self.rew_buf, self.reset_buf, self.extras
+
+    def randomize_friction(self):
+        friction_range = self.domain_rand_cfg['friction_range']
+        self.robot.set_friction_ratio(
+            friction_ratio = friction_range[0] + torch.rand(self.num_envs, self.robot.n_links, device=self.device) * (friction_range[1] - friction_range[0]),
+            link_indices = np.arange(0, self.robot.n_links)
+        )
+        self.plane.set_friction_ratio(
+            friction_ratio = friction_range[0] + torch.rand(self.num_envs, self.plane.n_links, device=self.device) * (friction_range[1] - friction_range[0]),
+            link_indices = np.arange(0, self.plane.n_links)
+        ) 
+
+    def randomize_mass(self):
+        added_mass_range = self.domain_rand_cfg.get('added_mass_range', [0.0, 0.0])
+        added_mass = float(torch.rand(1).item() * (added_mass_range[1] - added_mass_range[0]) + added_mass_range[0])
+        new_mass = max(self.pelvis_mass + added_mass, 0.1)
+        self.pelvis_link.set_mass(new_mass)
+
+    def push_robots(self):
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(self.domain_rand_cfg['push_interval_s']/self.dt) == 0]
+        if len(push_env_ids) == 0:
+            return
+        max_vel_xy = self.domain_rand_cfg['max_push_vel_xy']
+        max_vel_rp = self.domain_rand_cfg['max_push_vel_rp']
+        new_base_lin_vel = torch.zeros_like(self.base_lin_vel)
+        new_base_ang_vel = torch.zeros_like(self.base_ang_vel)
+        new_base_lin_vel[push_env_ids] = gs_rand_float(-max_vel_xy, max_vel_xy, (len(push_env_ids), 3), self.device)
+        new_base_ang_vel[push_env_ids] = gs_rand_float(-max_vel_rp, max_vel_rp, (len(push_env_ids), 3), self.device)
+        d_vel_xy = new_base_lin_vel - self.base_lin_vel[:, :3]
+        d_vel_rp = new_base_ang_vel - self.base_ang_vel[:, :3]
+        d_pos = d_vel_xy * self.dt
+        d_pos[:, [2]] = 0
+        current_pos = self.robot.get_pos()
+        new_pos = current_pos[push_env_ids] + d_pos[push_env_ids]
+        self.robot.set_pos(new_pos, zero_velocity=False, envs_idx=push_env_ids)
+        current_euler = self.base_euler
+        d_euler = d_vel_rp * self.dt
+        new_euler = current_euler[push_env_ids] + d_euler[push_env_ids]
+        new_quat = xyz_to_quat(new_euler)
+        self.robot.set_quat(new_quat, zero_velocity=False, envs_idx=push_env_ids)
+
+    def get_observations(self):
+        return self.obs_buf
     
+    def get_privileged_observations(self):
+        return None
+
     def reset_idx(self, envs_idx):
-        """reset specified environments."""
         if len(envs_idx) == 0:
             return
-        
-        # reset dofs
         self.dof_pos[envs_idx] = self.default_dof_pos
         self.dof_vel[envs_idx] = 0.0
         self.robot.set_dofs_position(
@@ -498,146 +335,125 @@ class G1DeeplocoEnv:
             zero_velocity=True,
             envs_idx=envs_idx,
         )
-
-        # reset base position adn orientation
         self.base_pos[envs_idx] = self.base_init_pos
-        self.base_quat[envs_idx] = self.base_init_quat
-        self.robot.set_pos(self.base_pos[envs_idx], envs_idx)
-        self.robot.set_quat(self.base_quat[envs_idx], envs_idx)
-
-        # reset buffers
+        self.base_quat[envs_idx] = self.base_init_quat.reshape(1, -1)
+        self.base_euler = quat_to_xyz(
+            transform_quat_by_quat(torch.ones_like(self.base_quat) * self.inv_base_init_quat, self.base_quat)
+        )
+        self.robot.set_pos(self.base_pos[envs_idx], zero_velocity=False, envs_idx=envs_idx)
+        self.robot.set_quat(self.base_quat[envs_idx], zero_velocity=False, envs_idx=envs_idx)
+        self.base_lin_vel[envs_idx] = 0
+        self.base_ang_vel[envs_idx] = 0
+        self.robot.zero_all_dofs_velocity(envs_idx)
+        self.last_actions[envs_idx] = 0.0
         self.episode_length_buf[envs_idx] = 0
-        self.reset_buf[envs_idx] = 0
-        self.rew_buf[envs_idx] = 0.0
-        for key in self.episode_sum.keys():
+        self.reset_buf[envs_idx] = True
+        self.extras["episode"] = {}
+        for key in self.episode_sums.keys():
+            self.extras["episode"]["rew_" + key] = (
+                torch.mean(self.episode_sums[key][envs_idx]).item() / self.env_cfg["episode_length_s"]
+            )
             self.episode_sums[key][envs_idx] = 0.0
-
-        # resample commands for reset environments
         self._resample_commands(envs_idx)
 
-    def compute_torques(self, actions):
-        """
-        compute torques using PD control.
+    def reset(self):
+        self.reset_buf[:] = True
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        extras = {
+        "observations": {
+            "critic": self.obs_buf,
+            "privileged": None
+            }
+        }
+        return self.obs_buf, extras
 
-        Args:
-            actions (torch.Tensor): Actions for all environments.
-
-        Returns:
-            torque (torch.Tensor): Computed torques for all joints.
-        """
-
-        # compute desired joint position based on action 
-        desired_joint_pos = self.default_dof_pos + actions + self.env_cfg["action_scale"]
-
-        # compute torques using PD control
-        torques = self.env_cfg["kp"] * (desired_joint_pos - self.dof_pos) - self.env_cfg["kd"] + self.dof_vel
-
-        return torques
-
-        
-    # placeholder : sample linear velocity (x, y) and angular velocity (yaw)
-
+    # --------------------- Reward Functions ---------------------
     def _reward_tracking_lin_vel(self):
-        """reward for tracking linear velocity commands."""
-        lin_vel_error = torch.sum(torch.square(self.commands[:, : 2] - self.base_lin_vel[:, :2]), dim=1)
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-lin_vel_error / self.reward_cfg["tracking_sigma"])
-
+    
     def _reward_tracking_ang_vel(self):
-        """reward for tracking angular velocity commands."""
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.reward_cfg["tracking_sigma"])
     
-    def _reward_base_height(self):
-        """reward for maintaining a desired base height."""
-        desired_height = self.env_cfg.get("desired_base_height", 0.5) # default desired height
-        height_error = torch.square(self.base_pos[:, 2] - desired_height)
-        return torch.exp(-height_error / self.reward_cfg["height_sigma"])
-    
-    def _reward_foot_clearance(self):
-        """reward for lifting feet during swing phases."""
-        foot_clearance = self.foot_position[:, :, 2] # z-coordinate of foot positions
-        desired_clearance = self.env_cfg.get("desired_foot_clearance", 0.1) # default desired clearance 
-
-        clearance_error = torch.sum(torch.sqaure(foot_clearance - desired_clearance), dim=1)
-        return torch.exp(-clearance_error / self.reward_cfg["clearance_sigma"])
-    
-    def _reward_joint_limits(self):
-        """penalize joint position close to their limits."""
-        joint_pos = self.dof_pos
-        joint_limits_lower = torch.tensor(self.env_cfg["joint_limits"]["lower"], device=self.device)
-        joint_limits_upper = torch.tensor(self.env_cfg["joint_limits"]["upper"], device=self.device)
-
-        limit_violation = torch.sum(
-            torch.maximum(joint_pos - joint_limits_upper, torch.tensor(0.0, device=self.device)) +
-            torch.maximum(joint_limits_lower - joint_pos, torch.tensor(0.0, device=self.device)),
-            dim=1,
-        )
-
-        return -limit_violation
-    
-    def _reward_torque(self):
-        """penalize high torque usage."""
-        torque = torch.sum(torch.square(self.torques), dim=1)
-        return -torque
-    
-    def _reward_contact_consistency(self):
-        """reward for consistent foot contact patterns."""
-        contact_states = self.foot_contacts # binary tensor indicating foot contact
-        desired_contact_states = self.desired_contact_states # desired contact pattern
-        contact_error = torch.sum(torch.square(contact_states - desired_contact_states), dim=1)
-        return torch.exp(-contact_error / self.reward_cfg["contact_sigma"])
-
-    def _reward_gait_mode(self):
-        """reward for matching the desired gait mode."""
-        gait_mode_error = torch.abs(self.commands[:, 3] - self.current_gait_mode)
-        return torch.exp(-gait_mode_error / self.reward_cfg["tracking_sigma"])
-
-    def _reward_orientation(self):
-        """reward for mainting a stable torso orientation."""
-        pitch_roll_error = torch.sum(torch.square(self.base_euler[:, :2]), dim= 1)
-        return torch.exp(-pitch_roll_error / self.reward_cfg["orientation_sigma"])
-
-    def _reward_energy(self):
-        """penalize energy consumption."""
-        power = torch.sum(torch.abs(self.torques * self.dof_vel), dim=1)
-        return -power
-
-    def _reward_action_smoothness(self):
-        """penalize jerky actions."""
-        action_diff = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-        return -action_diff
+    def _reward_lin_vel_z(self):
+        return -torch.square(self.base_lin_vel[:, 2])
     
     def _reward_action_rate(self):
-        """penalize high action rates (jerky actions)."""
-        action_diff = torch.sum(torch.sqaure(self.actions - self.last_actions), dim=1)
-        return -action_diff
+        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
     
-    def compute_reward(self): 
-        """compute the total reward."""
-        rewards = {
-            "tracking_lin_vel": self._reward_tracking_lin_vel(),
-            "tracking_ang_vel": self._reward_tracking_ang_vel(),
-            "gait_mode": self._reward_gait_mode(),
-            "orientation": self._reward_orientation(),
-            "energy": self._reward_energy(),
-            "action_smoothness": self._reward_action_smoothness(),
-            "base_height": self._reward_base_height(),
-            "foot_clearance": self._reward_foot_clearance(),
-            "joint_limits": self._reward_joint_limits(),
-            "torque": self._reward_torque(),
-            "contact_consistency": self._reward_contact_consistency(),
-            "action_rate": self._reward_action_rate,
-        }
+    def _reward_base_height(self):
+        return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+    
+    def _reward_alive(self):
+        return 1.0
+    
+    def _reward_gait_contact(self):
+        # More gradual transition between stance and swing
+        stance_factor = 0.5 * (1 + torch.cos(2 * np.pi * self.leg_phase))  # Smooth sinusoidal transition
+        is_stance = stance_factor > 0.5
+        contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
+        
+        # Additional penalty for simultaneous contact
+        both_contact = torch.all(contact, dim=1).float()
+        alternating_reward = torch.sum(~(contact ^ is_stance), dim=1).float()
+        
+        return alternating_reward - 2.0 * both_contact  # Penalize simultaneous contact
 
-        total_reward = torch.zero_like(rewards["tracking_lin_vel"])
-        for name, reward in rewards.items():
-            total_reward += self.reward_scales[name] * reward
+    def _reward_gait_swing(self):
+        # More gradual transition between stance and swing
+        swing_factor = 0.5 * (1 - torch.cos(2 * np.pi * self.leg_phase))  # Smooth sinusoidal transition
+        is_swing = swing_factor > 0.5
+        contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
+        
+        # Additional reward for proper swing height during swing phase
+        swing_height = self.feet_pos[:, :, 2]
+        target_swing_height = torch.where(is_swing, 
+                                        torch.ones_like(swing_height) * self.reward_cfg["feet_height_target"],
+                                        torch.zeros_like(swing_height))
+        height_reward = torch.exp(-torch.square(swing_height - target_swing_height) / 0.1)
+        
+        # Combine swing timing and height rewards
+        swing_reward = torch.sum(~(contact ^ is_swing), dim=1).float()
+        return swing_reward + 0.5 * torch.sum(height_reward * is_swing.float(), dim=1)
 
-        return total_reward
-
+    def _reward_contact_no_vel(self):
+        contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 1.0
+        contact_feet_vel = torch.norm(self.feet_vel, dim=2) * contact.float()
+        return -torch.sum(contact_feet_vel, dim=1)
+    
+    def _reward_feet_swing_height(self):
+        is_swing = self.leg_phase >= 0.5  # Changed threshold to 0.5 for smoother transition
+        target_height = torch.where(
+            is_swing,
+            torch.ones_like(self.feet_pos[:, :, 2]) * self.reward_cfg["feet_height_target"],
+            torch.zeros_like(self.feet_pos[:, :, 2])
+        )
+        height_error = torch.square(self.feet_pos[:, :, 2] - target_height)
+        height_reward = torch.exp(-height_error / 0.1)
+        
+        # Add penalty for feet being too close together during swing
+        feet_distance = torch.abs(self.feet_pos[:, 0, 1] - self.feet_pos[:, 1, 1])  # Y-distance between feet
+        distance_penalty = torch.exp(-torch.square(feet_distance - 0.3) / 0.1)  # Encourage ~30cm between feet
+        
+        return torch.sum(height_reward, dim=1) + distance_penalty
+    
+    def _reward_orientation(self):
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+    
+    def _reward_ang_vel_xy(self):
+        return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+    
+    def _reward_dof_vel(self):
+        return torch.sum(torch.square(self.dof_vel), dim=1)
+    
+    def _reward_knee_angle(self):
+        knee_indices = [self.env_cfg["dof_names"].index(name) for name in ["left_knee_joint", "right_knee_joint"]]
+        target_angle = 0.3  # A slight bend, adjust as needed
+        return -torch.sum(torch.square(self.dof_pos[:, knee_indices] - target_angle), dim=1)
+    
+    def _reward_feet_angle(self):
+        return torch.sum(torch.square(self.feet_quat_euler[:, :, 2] - self.feet_quat_euler_ref[:, :, 2]), dim=1)
+    
     def close(self):
-        """clean up the environment."""
-        self.scene.close()
-
-
-    
+        print("Environment closed.")

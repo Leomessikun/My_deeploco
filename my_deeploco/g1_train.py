@@ -1,266 +1,194 @@
 import argparse
-import os 
+import os
 import pickle
 import shutil
-import torch
-import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
-from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv 
 from g1_env import G1DeeplocoEnv
-from g1_gym_wrapper import G1DeeplocoGymWrapper 
+from rsl_rl.runners import OnPolicyRunner
 import genesis as gs
 
 def get_train_cfg(exp_name, max_iterations):
-    """
-    define training configuration.
-    """ 
-    train_cfg = {
-        "algorithm":{
+    train_cfg_dict = {
+        "algorithm": {
             "clip_param": 0.2,
+            "desired_kl": 0.01,
             "entropy_coef": 0.01,
             "gamma": 0.99,
-            "gae_lambda": 0.95,
+            "lam": 0.95,
             "learning_rate": 3e-4,
-            "max_grad_norm": 0.5,
-            "n_epochs": 10,
-            "n_steps": 2048,
-            "batch_size": 64,
+            "max_grad_norm": 1.0,
+            "num_learning_epochs": 5,
+            "num_mini_batches": 4,
+            "schedule": "adaptive",
+            "use_clipped_value_loss": True,
+            "value_loss_coef": 1.0,
         },
+        "init_member_classes": {},
         "policy": {
-            "net_arch": [dict(pi=[512, 256, 128], vf=[512, 256, 128])],
-            "activation_fn": torch.nn.ELU,
+            "activation": "elu",
+            "actor_hidden_dims": [512, 256, 128],
+            "critic_hidden_dims": [512, 256, 128],
+            "init_noise_std": 0.5,
         },
         "runner": {
+            "algorithm_class_name": "PPO",
+            "checkpoint": -1,
             "experiment_name": exp_name,
+            "load_run": -1,
+            "log_interval": 10,
             "max_iterations": max_iterations,
-            "log_interval": 1,
-            "save_interval": 100,
+            "policy_class_name": "ActorCritic",
+            "record_interval": -1,
+            "resume": False,
+            "resume_path": None,
+            "run_name": "",
+            "runner_class_name": "OnPolicyRunner",
+            "num_steps_per_env": 32,
+            "save_interval": 50,
+            "empirical_normalization": False,
         },
+        "seed": 1,
     }
-    return train_cfg
+
+    return train_cfg_dict
 
 def get_cfgs():
-    """
-    define environment, observation, reward, and command configurations.
-    """
-    env_cfg={
-        "num_actions": 29,  # Updated to match the URDF
+    env_cfg = {
+        "dof_names": [
+            "left_hip_pitch_joint",
+            "left_hip_roll_joint",
+            "left_hip_yaw_joint",
+            "left_knee_joint",
+            "left_ankle_pitch_joint",
+            "left_ankle_roll_joint",
+            "right_hip_pitch_joint",
+            "right_hip_roll_joint",
+            "right_hip_yaw_joint",
+            "right_knee_joint",
+            "right_ankle_pitch_joint",
+            "right_ankle_roll_joint"
+        ],
         "default_joint_angles": {
-             "left_hip_pitch_joint": 0.0,
+            "left_hip_pitch_joint": 0.0,
             "left_hip_roll_joint": 0.0,
             "left_hip_yaw_joint": 0.0,
-            "left_knee_joint": 0.0,
+            "left_knee_joint": 0.3,
             "left_ankle_pitch_joint": 0.0,
             "left_ankle_roll_joint": 0.0,
             "right_hip_pitch_joint": 0.0,
             "right_hip_roll_joint": 0.0,
             "right_hip_yaw_joint": 0.0,
-            "right_knee_joint": 0.0,
+            "right_knee_joint": 0.3,
             "right_ankle_pitch_joint": 0.0,
-            "right_ankle_roll_joint": 0.0,
-            "waist_yaw_joint": 0.0,
-            "waist_roll_joint": 0.0,
-            "waist_pitch_joint": 0.0,
-            "left_shoulder_pitch_joint": 0.0,
-            "left_shoulder_roll_joint": 0.0,
-            "left_shoulder_yaw_joint": 0.0,
-            "left_elbow_joint": 0.0,
-            "left_wrist_roll_joint": 0.0,
-            "left_wrist_pitch_joint": 0.0,
-            "left_wrist_yaw_joint": 0.0,
-            "right_shoulder_pitch_joint": 0.0,
-            "right_shoulder_roll_joint": 0.0,
-            "right_shoulder_yaw_joint": 0.0,
-            "right_elbow_joint": 0.0,
-            "right_wrist_roll_joint": 0.0,
-            "right_wrist_pitch_joint": 0.0,
-            "right_wrist_yaw_joint": 0.0,
+            "right_ankle_roll_joint": 0.0
         },
-        "dof_names": [
-            "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
-            "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
-            "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
-            "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
-            "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
-            "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
-            "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint", "right_shoulder_pitch_joint", "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint",
-            "right_wrist_pitch_joint", "right_wrist_yaw_joint",
-        ],
-        "kp": 20.0,
-        "kd": 0.5,
-        "base_init_pos": [0.0, 0.0, 0.5],
-        "base_init_quat": [0.0, 0.0, 0.0, 1.0],
-        "episode_length_s": 20.0,
-        "resampling_time_s": 4.0,
-        "action_scale": 0.25,
-        "clip_actions": 100.0
+        "kp": 80.0,
+        "kd": 2.0,
+        # Termination
+        "terminate_after_contacts_on": ["pelvis"],
+        "termination_if_pelvis_z_less_than": 0.35,
+        # Base pose
+        "base_init_pos": [0.0, 0.0, 0.8],
+        "base_init_quat": [1.0, 0.0, 0.0, 0.0],
+        "action_scale": 0.3,
+        "episode_length_s": 10.0,
+        "resampling_time_s": 5.0,
+        "simulation_action_latency": True,
+        "clip_actions": 5.0,
+        "clip_observations": 5.0,
     }
-
-    obs_cfg={
-        "num_obs": 64,  
+    obs_cfg = {
+        "num_obs": 48,
         "obs_scales": {
-            "lin_vel": 2.0,
-            "ang_vel": 0.25,
+            "lin_vel": 2.5,
+            "ang_vel": 0.3,
             "dof_pos": 1.0,
-            "dof_vel": 0.05,
-        },
+            "dof_vel": 0.07,
+            "heading": 0.15,
+        }
     }
-
-    reward_cfg={
+    reward_cfg = {
         "tracking_sigma": 0.25,
-        "height_sigma": 0.1,
-        "clearance_sigma": 0.05,
-        "contact_sigma": 0.1,
+        "base_height_target": 0.45,
+        "feet_height_target": 0.08,
         "reward_scales": {
-            "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.2,
-            "gait_mode": 0.1,
-            "orientation": 0.5,
-            "energy":-0.01,
-            "action_smoothness": -0.005,
-            "base_height": -50.0,
-            "foot_clearance": 0.2,
-            "action_rate": -0.005,
-            "joint_limits": -0.1,  # Penalty for exceeding joint limits
-            "torque": -0.01,
-            "contact_consistency": 0.2,
-            #"energy_consumption": -0.01,  # Penalty for high energy usage
+            "tracking_lin_vel": 4.0,
+            "tracking_ang_vel": 1.0,
+            "alive": 0.5,
+            "gait_contact": 2.0,
+            "gait_swing": 2.0,
+            "knee_angle": 0.3,
+            "lin_vel_z": -0.2,
+            "ang_vel_xy": -0.1,
+            "base_height": -0.5,
+            "orientation": -0.3,
+            "action_rate": -0.01,
+            "dof_vel": -0.005,
+            "contact_no_vel": -0.05,
+            "feet_swing_height": -0.5,
+            "feet_angle": -0.1,
         },
     }
-
-    command_cfg={
-        "num_commands": 3,
-        "lin_vel_x_range": [0.5, 1.5],
-        "lin_vel_y_range": [-0.2, 0.2],
-        "ang_vel_yaw_range": [-0.5, 0.5],
-        "gait_mode_range": [0, 2],
-        "locomotion_param_range": [0.1, 0.3],
+    command_cfg = {
+        "curriculum": True,
+        "max_curriculum": 1.0,
+        "num_commands": 4,
+        "heading_command": True,
+        "curriculum_steps": 5000,
+        "ranges": {
+        "lin_vel_x": [0.0, 1.0],  # Increase max forward speed from 0.5 to 1.0
+        "lin_vel_y": [-0.3, 0.3],  # Slightly widen lateral movement 
+        "ang_vel_yaw": [-0.5, 0.5],  # Increase rotation range
+        "heading": [-1.0, 1.0]  # Wider heading range
     }
-    return env_cfg, obs_cfg, reward_cfg, command_cfg
-
+    }
+    domain_rand_cfg = {
+        "randomize_friction": True,
+        "friction_range": [0.7, 1.3],  # More conservative range
+        "randomize_mass": True,
+        "added_mass_range": [-1.0, 1.0],  # Smaller mass variation
+        "push_robots": True,
+        "push_interval_s": 7.0,
+        "max_push_vel_xy": 1.5,  # Moderate pushes
+        "max_push_vel_rp": 45.0,  # Degrees/second, more conservative
+    }
+    return env_cfg, obs_cfg, reward_cfg, command_cfg, domain_rand_cfg
 
 def main():
-    # parse arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp_name", type=str, default="g1-deeploco")
-    parser.add_argument("-B", "--num_envs", type=int, default=1024)
-    parser.add_argument("--max_iterations", type=int, default=100)
-    parser.add_argument("--device", type=str, default="cuda")    
+    parser = argparse.ArgumentParser(description="G1 Deeploco Training Script")
+    parser.add_argument("-e", "--exp_name", type=str, default="g1-deeploco-walk")
+    parser.add_argument("-B", "--num_envs", type=int, default=512)
+    parser.add_argument("--max_iterations", type=int, default=10_000)
     args = parser.parse_args()
 
-    # intialize genesis
     gs.init(logging_level="warning")
 
-    # define log directory
     log_dir = f"log/{args.exp_name}"
     if os.path.exists(log_dir):
         shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
-    # load configurations
-    env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
+    env_cfg, obs_cfg, reward_cfg, command_cfg, domain_rand_cfg = get_cfgs()
     train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
 
-    # Save configurations
-    try:
-        pickle.dump(
-            [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg],
-            open(f"{log_dir}/cfgs.pkl", "wb"),
-        )
-        print(f"Configurations saved to {log_dir}/cfgs.pkl")
-    except Exception as e:
-        print(f"Failed to save configurations: {e}")
-        return
-
-    # create vectorized environment
-    def make_env(env_cfg, obs_cfg, reward_cfg, command_cfg):
-        def __init__():
-            env = G1DeeplocoEnv(
-                num_envs=1,
-                env_cfg=env_cfg,
-                obs_cfg=obs_cfg,
-                reward_cfg=reward_cfg,
-                command_cfg=command_cfg,
-                device="cuda" 
-            )
-            return G1DeeplocoGymWrapper(env)
-
-        return __init__
-    
-    try:
-        env = SubprocVecEnv([
-            make_env(env_cfg, obs_cfg, reward_cfg, command_cfg) for _ in range(args.num_envs)
-        ])
-        env = VecNormalize(env, norm_obs=True, norm_reward=True)
-        print("Environment created successfully.")
-    except Exception as e:
-        print(f"Failed to create environment: {e}")
-        return
-
-    # Initialize PPO model
-    try:
-        model = PPO(
-            "MlpPolicy",
-            env,
-            policy_kwargs=train_cfg["policy"],
-            learning_rate=train_cfg["algorithm"]["learning_rate"],
-            n_steps=train_cfg["algorithm"]["n_steps"],
-            batch_size=train_cfg["algorithm"]["batch_size"],
-            n_epochs=train_cfg["algorithm"]["n_epochs"],
-            gamma=train_cfg["algorithm"]["gamma"],
-            gae_lambda=train_cfg["algorithm"]["gae_lambda"],
-            clip_range=train_cfg["algorithm"]["clip_param"],
-            ent_coef=train_cfg["algorithm"]["entropy_coef"],
-            max_grad_norm=train_cfg["algorithm"]["max_grad_norm"],
-            verbose=1,
-            tensorboard_log=log_dir,
-            device=args.device,
-        )
-        print("PPO model initialized successfully.")
-    except Exception as e:
-        print(f"Failed to initialize PPO model: {e}")
-        return
-
-   # Set up callbacks
-    checkpoint_callback = CheckpointCallback(
-        save_freq=train_cfg["runner"]["save_interval"] * args.num_envs,
-        save_path=log_dir,
-        name_prefix="ppo_g1",
+    env = G1DeeplocoEnv(
+        num_envs=args.num_envs,
+        env_cfg=env_cfg,
+        obs_cfg=obs_cfg,
+        reward_cfg=reward_cfg,
+        command_cfg=command_cfg,
+        domain_rand_cfg=domain_rand_cfg,
+        show_viewer=False,
+        device="cuda"
     )
-    eval_callback = EvalCallback(
-        env,
-        best_model_save_path=log_dir,
-        log_path=log_dir,
-        eval_freq=train_cfg["runner"]["save_interval"] * args.num_envs,
-        deterministic=True,
-        render=False,
+    
+    runner = OnPolicyRunner(env, train_cfg, log_dir, device="cuda:0")
+
+    pickle.dump(
+        [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg, domain_rand_cfg],
+        open(f"{log_dir}/cfgs.pkl", "wb"),
     )
 
-    # Train the model
-    try:
-        model.learn(
-            total_timesteps=train_cfg["runner"]["max_iterations"] * train_cfg["algorithm"]["n_steps"] * args.num_envs,
-            callback=[checkpoint_callback, eval_callback],
-        )
-        print("Training completed successfully.")
-    except Exception as e:
-        print(f"Training failed: {e}")
-        return
-    
-   # Save the final model and normalization statistics
-    try:
-        model_save_path = f"{log_dir}/ppo_g1_final"
-        model.save(model_save_path)
-        print(f"Model saved to: {model_save_path}.zip")
+    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
-        env_save_path = f"{log_dir}/vec_normalize_final.pkl"
-        env.save(env_save_path)
-        print(f"Normalization statistics saved to: {env_save_path}")
-    except Exception as e:
-        print(f"Failed to save final model or normalization: {e}")
-    
 if __name__ == "__main__":
     main()
