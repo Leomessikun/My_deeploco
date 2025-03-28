@@ -126,14 +126,17 @@ class G1DeeplocoEnv:
         # Reference feet euler 
         self.feet_quat_euler_ref = torch.tensor([[90, 0, 0], [-90, 0, 0]], device=self.device, dtype=gs.tc_float)
         self.feet_quat_euler_ref = self.feet_quat_euler_ref.repeat(num_envs, 1, 1)
+        
+        # Introduce randomization in the phase offset for each environment to encourage diversity
         period = 1.0  # Increased period for more natural gait timing
-        offset = 0.5
-        self.phase = (self.episode_length_buf * self.dt) % period / period
-        self.phase_left = self.phase 
-        self.phase_right = (self.phase + offset) % 1
+        self.phase_offset = torch.rand(self.num_envs, device=self.device) * period  # Random offset per env
+        self.phase = ((self.episode_length_buf * self.dt + self.phase_offset) % period) / period
+        self.phase_left = self.phase
+        self.phase_right = (self.phase + self.phase_offset) % 1
         self.leg_phase = torch.cat([self.phase_left.unsqueeze(1), self.phase_right.unsqueeze(1)], dim=-1)
         self.sin_phase = torch.sin(2 * np.pi * self.phase).unsqueeze(1)
         self.cos_phase = torch.cos(2 * np.pi * self.phase).unsqueeze(1)
+        
         self.pelvis_link = self.robot.get_link(name='pelvis')
         self.pelvis_mass = self.pelvis_link.get_mass()
         self.pelvis_id_local = self.pelvis_link.idx_local
@@ -259,6 +262,7 @@ class G1DeeplocoEnv:
             self.rew_buf += rew
             self.episode_sums[name] += rew
         
+        contact = (self.contact_forces[:, self.feet_indices, 2] > 5.0).float()  # Match threshold with rewards
         # Compute observations
         self.obs_buf = torch.cat([
             self.base_ang_vel * self.obs_scales["ang_vel"],
@@ -269,6 +273,7 @@ class G1DeeplocoEnv:
             self.actions,
             self.sin_phase,
             self.cos_phase,
+            contact,  # Adds 2 dimensions (left, right foot contact)
         ], axis=-1)
         
         self.obs_buf = torch.clip(self.obs_buf, -self.env_cfg["clip_observations"], self.env_cfg["clip_observations"])
@@ -394,11 +399,16 @@ class G1DeeplocoEnv:
         is_stance = stance_factor > 0.5
         contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
         
-        # Additional penalty for simultaneous contact
-        both_contact = torch.all(contact, dim=1).float()
-        alternating_reward = torch.sum(~(contact ^ is_stance), dim=1).float()
+        # Reward for correct contact timing
+        contact_reward = torch.sum(~(contact ^ is_stance), dim=1).float()
         
-        return alternating_reward - 2.0 * both_contact  # Penalize simultaneous contact
+        # Allow brief double support but penalize extended double support
+        both_contact = torch.all(contact, dim=1).float()
+        double_support_penalty = torch.where(both_contact > 0, 
+                                           0.5 * torch.ones_like(both_contact),  # Reduced penalty
+                                           torch.zeros_like(both_contact))
+        
+        return contact_reward - double_support_penalty
 
     def _reward_gait_swing(self):
         # More gradual transition between stance and swing

@@ -97,7 +97,7 @@ def get_cfgs():
         "clip_observations": 5.0,
     }
     obs_cfg = {
-        "num_obs": 48,
+        "num_obs": 50,
         "obs_scales": {
             "lin_vel": 2.5,
             "ang_vel": 0.3,
@@ -111,9 +111,9 @@ def get_cfgs():
         "base_height_target": 0.45,
         "feet_height_target": 0.08,
         "reward_scales": {
-            "tracking_lin_vel": 4.0,
+            "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 1.0,
-            "alive": 0.5,
+            "alive": 1.0,
             "gait_contact": 2.0,
             "gait_swing": 2.0,
             "knee_angle": 0.3,
@@ -139,7 +139,13 @@ def get_cfgs():
         "lin_vel_y": [-0.3, 0.3],  # Slightly widen lateral movement 
         "ang_vel_yaw": [-0.5, 0.5],  # Increase rotation range
         "heading": [-1.0, 1.0]  # Wider heading range
-    }
+        },
+        "initial_ranges": {  # Add if using initial phase
+            "lin_vel_x": [0.2, 0.5],
+            "lin_vel_y": [-0.1, 0.1],
+            "ang_vel_yaw": [-0.2, 0.2],
+            "heading": [-0.5, 0.5]
+        }
     }
     domain_rand_cfg = {
         "randomize_friction": True,
@@ -148,16 +154,16 @@ def get_cfgs():
         "added_mass_range": [-1.0, 1.0],  # Smaller mass variation
         "push_robots": True,
         "push_interval_s": 7.0,
-        "max_push_vel_xy": 1.5,  # Moderate pushes
-        "max_push_vel_rp": 45.0,  # Degrees/second, more conservative
+        "max_push_vel_xy": 1.0,  # Moderate pushes
+        "max_push_vel_rp": 25.0,  # Degrees/second, more conservative
     }
     return env_cfg, obs_cfg, reward_cfg, command_cfg, domain_rand_cfg
 
 def main():
     parser = argparse.ArgumentParser(description="G1 Deeploco Training Script")
     parser.add_argument("-e", "--exp_name", type=str, default="g1-deeploco-walk")
-    parser.add_argument("-B", "--num_envs", type=int, default=512)
-    parser.add_argument("--max_iterations", type=int, default=10_000)
+    parser.add_argument("-B", "--num_envs", type=int, default=20_000)
+    parser.add_argument("--max_iterations", type=int, default=32)
     args = parser.parse_args()
 
     gs.init(logging_level="warning")
