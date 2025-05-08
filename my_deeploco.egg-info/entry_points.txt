@@ -1,0 +1,3 @@
+[console_scripts]
+g1-eval = my_deeploco.g1_eval:main
+g1-train = my_deeploco.g1_train:main

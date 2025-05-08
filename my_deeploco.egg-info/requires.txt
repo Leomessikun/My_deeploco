@@ -1,0 +1,6 @@
+torch>=1.10.0
+numpy>=1.21.0
+gym>=0.21.0
+
+[rsl_rl]
+rsl_rl@ git+https://github.com/leggedrobotics/rsl_rl.git#egg=rsl_rl
