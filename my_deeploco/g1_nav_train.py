@@ -162,8 +162,8 @@ def get_cfgs():
             "gait_contact": 0.5,
             "gait_swing": -0.5,
             "contact_no_vel": -0.5,
-            "feet_swing_height": -2.0,
-            "orientation": -2.0,
+            "feet_swing_height": -4.0,
+            "orientation": -8.0,
             "ang_vel_xy": -1.0,
             "dof_vel": -0.01,
             "knee_angle": 0.1,
@@ -171,7 +171,7 @@ def get_cfgs():
             "goal_progress": 3.0,
             "footstep_tracking": 8.0,
             "forward_vel": 1.0,
-            "heading_alignment": 1.0,
+            "heading_alignment": 2.0,
 
         }
     }
