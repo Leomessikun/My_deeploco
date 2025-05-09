@@ -648,10 +648,11 @@ class G1DeeplocoEnv:
         return footstep_reward
 
     def _reward_goal_progress(self):
-        # Reward increase in x-position
-        prev_x = self.base_pos[:, 0] - self.base_lin_vel[:, 0] * self.dt
-        curr_x = self.base_pos[:, 0]
-        return (curr_x - prev_x) * 5.0  # Scale for denser reward
+        # Reward progress towards the goal in the global frame
+        prev_dist = torch.norm(self.goal_pos - (self.base_pos[:, :2] - self.base_lin_vel[:, :2] * self.dt), dim=1)
+        curr_dist = torch.norm(self.goal_pos - self.base_pos[:, :2], dim=1)
+        return (prev_dist - curr_dist) * 10.0  # Positive if moving closer to goal
+
     
     def _reward_forward_vel(self):
         forward_vel = self.base_lin_vel[:, 0]  # x-direction
