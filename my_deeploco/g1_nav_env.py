@@ -227,31 +227,26 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
     def plan_step_sequence(self, idx, num_steps=10):
-        # Use current base position and orientation
         base_pos = self.base_pos[idx, :2].cpu().numpy()
-        # Compute direction to current goal
-        to_goal = self.goal_pos[idx].cpu().numpy() - base_pos
-        dist_to_goal = np.linalg.norm(to_goal)
-        if dist_to_goal > 1e-6:
-            dir_to_goal = to_goal / dist_to_goal
-        else:
-            # If already at goal, just keep previous direction or default to x
-            dir_to_goal = np.array([1.0, 0.0])
-        # Perpendicular vector for left/right offset
-        perp = np.array([-dir_to_goal[1], dir_to_goal[0]])
-        step_size = float(self.env_cfg["step_size"])
-        step_gap = float(self.env_cfg["step_gap"])
+        # Get current yaw (heading) from quaternion
+        base_quat = self.base_quat[idx].cpu().numpy()
+        # Use your quat_to_xyz or similar to get yaw
+        base_yaw = quat_to_xyz(torch.tensor(base_quat).unsqueeze(0))[0, 2]
+        step_length = float(self.env_cfg["step_size"])
+        step_width = float(self.env_cfg["step_gap"])
         feet_height_target = float(self.env_cfg["feet_height_target"])
         sequence = []
+        stance = 1  # 1 for left, -1 for right
         for n in range(num_steps):
-            center = base_pos + (n + 1) * step_size * dir_to_goal
-            if n % 2 == 0:
-                # Left foot
-                target_xy = center + (step_gap / 2) * perp
-            else:
-                # Right foot
-                target_xy = center - (step_gap / 2) * perp
+            # Step delta in local frame
+            delta_local = np.array([step_length, stance * step_width / 2])
+            # Rotate to world frame
+            c, s = np.cos(base_yaw), np.sin(base_yaw)
+            rot = np.array([[c, -s], [s, c]])
+            delta_world = rot @ delta_local
+            target_xy = base_pos + (n + 1) * delta_world
             sequence.append([target_xy[0], target_xy[1], feet_height_target, 0.0])
+            stance *= -1  # Alternate stance
         return sequence
 
     def step(self, actions):
