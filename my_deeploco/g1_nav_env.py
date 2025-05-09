@@ -652,6 +652,12 @@ class G1DeeplocoEnv:
         prev_x = self.base_pos[:, 0] - self.base_lin_vel[:, 0] * self.dt
         curr_x = self.base_pos[:, 0]
         return (curr_x - prev_x) * 5.0  # Scale for denser reward
+    
+    def _reward_forward_vel(self):
+        forward_vel = self.base_lin_vel[:, 0]  # x-direction
+        lateral_vel = self.base_lin_vel[:, 1]  # y-direction
+        return torch.exp(-torch.square(forward_vel - 0.3)) - torch.square(lateral_vel)
+
 
     def _register_reward_functions(self):
         reward_function_names = [
