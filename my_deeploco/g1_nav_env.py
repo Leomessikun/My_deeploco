@@ -660,6 +660,16 @@ class G1DeeplocoEnv:
         forward_vel = self.base_lin_vel[:, 0]  # x-direction
         lateral_vel = self.base_lin_vel[:, 1]  # y-direction
         return torch.exp(-torch.square(forward_vel - 0.3)) - torch.square(lateral_vel)
+    
+    def _reward_heading_alignment(self):
+        # Get current yaw
+        base_yaw = quat_to_xyz(self.base_quat)[..., 2]
+        # Direction to goal
+        to_goal = self.goal_pos - self.base_pos[:, :2]
+        goal_yaw = torch.atan2(to_goal[:, 1], to_goal[:, 0])
+        heading_err = torch.abs(base_yaw - goal_yaw)
+        heading_err = torch.min(2 * np.pi - heading_err, heading_err)
+        return torch.pow(0.5 * (torch.cos(heading_err) + 1), 4)
 
 
     def _register_reward_functions(self):
@@ -681,6 +691,8 @@ class G1DeeplocoEnv:
             "feet_angle",
             "footstep_tracking",
             "goal_progress",
+            "forward_vel",
+            "heading_alignment",
         ]
         for name in reward_function_names:
             if hasattr(self, f"_reward_{name}"):
