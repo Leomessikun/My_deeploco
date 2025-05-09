@@ -170,6 +170,7 @@ def get_cfgs():
             "feet_angle": -0.01,
             "goal_progress": 3.0,
             "footstep_tracking": 8.0,
+            "forward_reward": 1.0,
         }
     }
     command_cfg = {
