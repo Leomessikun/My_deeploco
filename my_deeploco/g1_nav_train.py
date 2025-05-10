@@ -162,7 +162,7 @@ def get_cfgs():
             "gait_contact": 0.5,
             "gait_swing": -0.5,
             "contact_no_vel": -0.5,
-            "feet_swing_height": -4.0,
+            "feet_swing_height": -8.0,
             "orientation": -8.0,
             "ang_vel_xy": -1.0,
             "dof_vel": -0.01,
