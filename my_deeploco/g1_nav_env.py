@@ -228,10 +228,10 @@ class G1DeeplocoEnv:
 
     def plan_step_sequence(self, idx, num_steps=10):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
-        # Get current yaw (heading) from quaternion
-        base_quat = self.base_quat[idx].cpu().numpy()
-        # Use your quat_to_xyz or similar to get yaw
-        base_yaw = quat_to_xyz(torch.tensor(base_quat).unsqueeze(0))[0, 2]
+        goal_pos = self.goal_pos[idx, :2].cpu().numpy()
+        # Direction to goal
+        dir_to_goal = goal_pos - base_pos
+        dir_to_goal = dir_to_goal / np.linalg.norm(dir_to_goal)  # Normalize
         step_length = float(self.env_cfg["step_size"])
         step_width = float(self.env_cfg["step_gap"])
         feet_height_target = float(self.env_cfg["feet_height_target"])
@@ -240,8 +240,8 @@ class G1DeeplocoEnv:
         for n in range(num_steps):
             # Step delta in local frame
             delta_local = np.array([step_length, stance * step_width / 2])
-            # Rotate to world frame
-            c, s = np.cos(base_yaw), np.sin(base_yaw)
+            # Rotate to world frame (use direction to goal instead of base_yaw)
+            c, s = np.cos(np.arctan2(dir_to_goal[1], dir_to_goal[0])), np.sin(np.arctan2(dir_to_goal[1], dir_to_goal[0]))
             rot = np.array([[c, -s], [s, c]])
             delta_world = rot @ delta_local
             target_xy = base_pos + (n + 1) * delta_world
