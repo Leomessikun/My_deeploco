@@ -166,7 +166,7 @@ def get_cfgs():
             "orientation": -8.0,
             "ang_vel_xy": -1.0,
             "dof_vel": -0.01,
-            "knee_angle": 0.1,
+            "knee_angle": 0.5,
             "feet_angle": -0.01,
             "goal_progress": 3.0,
             "footstep_tracking": 8.0,

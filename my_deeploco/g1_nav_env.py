@@ -632,7 +632,9 @@ class G1DeeplocoEnv:
         return torch.sum(torch.square(self.dof_vel), dim=1)
 
     def _reward_knee_angle(self):
-        return torch.sum(torch.square(self.dof_pos[:, self.knee_indices]), dim=1)
+        target_knee_angle = 0.2  # Slightly bent knee
+        knee_error = torch.square(self.dof_pos[:, self.knee_indices] - target_knee_angle)
+        return -torch.sum(knee_error, dim=1)
     
     def _reward_feet_angle(self):
         return torch.sum(torch.square(self.feet_quat_euler[:,:,2] - self.feet_quat_euler_ref[:,:,2]), dim=1)
