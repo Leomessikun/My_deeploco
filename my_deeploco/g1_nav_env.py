@@ -229,26 +229,26 @@ class G1DeeplocoEnv:
     def plan_step_sequence(self, idx, num_steps=10):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-        # Direction to goal
-        dir_to_goal = goal_pos - base_pos
-        dir_to_goal = dir_to_goal / np.linalg.norm(dir_to_goal)  # Normalize
+        # Compute heading toward the goal
+        delta = goal_pos - base_pos
+        heading = np.arctan2(delta[1], delta[0])
         step_length = float(self.env_cfg["step_size"])
         step_width = float(self.env_cfg["step_gap"])
         feet_height_target = float(self.env_cfg["feet_height_target"])
         sequence = []
         stance = 1  # 1 for left, -1 for right
+        # Start at the current base position
+        curr_pos = base_pos.copy()
         for n in range(num_steps):
-            # Step delta in local frame
-            delta_local = np.array([step_length, stance * step_width / 2])
-            # Rotate to world frame (use direction to goal instead of base_yaw)
-            c, s = np.cos(np.arctan2(dir_to_goal[1], dir_to_goal[0])), np.sin(np.arctan2(dir_to_goal[1], dir_to_goal[0]))
-            rot = np.array([[c, -s], [s, c]])
-            delta_world = rot @ delta_local
-            target_xy = base_pos + (n + 1) * delta_world
-            sequence.append([target_xy[0], target_xy[1], feet_height_target, 0.0])
+            # Step in the heading direction
+            forward = np.array([np.cos(heading), np.sin(heading)])
+            lateral = np.array([-np.sin(heading), np.cos(heading)])
+            step_offset = step_length * forward + stance * (step_width / 2) * lateral
+            curr_pos = curr_pos + step_offset
+            sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
             stance *= -1  # Alternate stance
         return sequence
-
+    
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
         exec_actions = self.last_actions if self.simulate_action_latency else self.actions
