@@ -226,7 +226,7 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 1] = 0.0  # No lateral velocity
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
-    def plan_step_sequence(self, idx, num_steps=10):
+    def plan_step_sequence(self, idx, num_steps=2):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
         # Compute heading toward the goal
@@ -248,7 +248,7 @@ class G1DeeplocoEnv:
             sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
             stance *= -1  # Alternate stance
         return sequence
-    
+
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
         exec_actions = self.last_actions if self.simulate_action_latency else self.actions
@@ -607,20 +607,29 @@ class G1DeeplocoEnv:
         penalize = torch.square(contact_feet_vel[:, :, :3])
         return torch.sum(penalize, dim=(1, 2))
 
-    """def _reward_feet_swing_height(self):
-        swing_height_reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
-        for i in range(self.feet_num):
-            is_swing = self.leg_phase[:, i] >= 0.55
-            # Only reward swing foot for being at target height
-            height_error = torch.abs(self.feet_pos[:, i, 2] - self.reward_cfg["feet_height_target"])
-            # Less aggressive penalty, positive reward for being close
-            swing_height_reward += (1.0 - torch.tanh(height_error / 0.05)) * is_swing.float()
-        return swing_height_reward"""
+
+    def _get_swing_height_target(self, leg_phase):
+        # Sinusoidal height profile: peaks at leg_phase = 0.775 (mid-swing)
+        swing_phase = (leg_phase - 0.55) / 0.45  # Normalize to [0, 1] (0.55 to 1.0 is swing)
+        swing_phase = torch.clamp(swing_phase, 0.0, 1.0)
+        max_height = 0.075  # Peak height (adjustable)
+        height = max_height * torch.sin(np.pi * swing_phase)  # Peaks at swing_phase = 0.5
+        return height
     
     def _reward_feet_swing_height(self):
+        swing_height_reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
+        for i in range(self.feet_num):
+            is_swing = (self.leg_phase[:, i] >= 0.55) & (~contact[:, i])
+            height_target = self._get_swing_height_target(self.leg_phase[:, i])
+            height_error = torch.abs(self.feet_pos[:, i, 2] - height_target)
+            swing_height_reward += torch.exp(-height_error / 0.05) * is_swing.float()
+        return swing_height_reward
+    
+    """def _reward_feet_swing_height(self):
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5  # Lowered threshold
         pos_error = torch.square(self.feet_pos[:, :, 2] - self.reward_cfg["feet_height_target"]) * ~contact
-        return torch.sum(pos_error, dim=(1))
+        return torch.sum(pos_error, dim=(1))"""
 
     def _reward_orientation(self):
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
@@ -642,13 +651,18 @@ class G1DeeplocoEnv:
     # New reward functions
     def _reward_footstep_tracking(self):
         footstep_reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
         for i in range(self.feet_num):
-            is_swing = self.leg_phase[:, i] >= 0.55
-            # Compute error between foot position and target in world frame
+            is_swing = (self.leg_phase[:, i] >= 0.55) & (~contact[:, i])
+            # Compute error in world frame
             target_world = self.base_pos + self.footstep_targets[:, i, :]
-            error = torch.norm(self.feet_pos[:, i, :] - target_world, dim=1)
-            # Denser reward: exponential decay of error with larger denominator
-            footstep_reward += torch.exp(-error / 0.3) * is_swing.float()
+            # Vertical error (height)
+            height_error = torch.abs(self.feet_pos[:, i, 2] - target_world[:, 2])
+            # Horizontal error (x, y)
+            horizontal_error = torch.norm(self.feet_pos[:, i, :2] - target_world[:, :2], dim=1)
+            # Combined reward: stronger weight on height
+            footstep_reward += (0.7 * torch.exp(-height_error / 0.05) + 
+                            0.3 * torch.exp(-horizontal_error / 0.3)) * is_swing.float()
         return footstep_reward
 
     def _reward_goal_progress(self):
@@ -657,12 +671,11 @@ class G1DeeplocoEnv:
         curr_dist = torch.norm(self.goal_pos - self.base_pos[:, :2], dim=1)
         return (prev_dist - curr_dist) * 10.0  # Positive if moving closer to goal
 
-    
     def _reward_forward_vel(self):
         forward_vel = self.base_lin_vel[:, 0]  # x-direction
         lateral_vel = self.base_lin_vel[:, 1]  # y-direction
         return torch.exp(-torch.square(forward_vel - 0.3)) - torch.square(lateral_vel)
-    
+
     def _reward_heading_alignment(self):
         # Get current yaw
         base_yaw = quat_to_xyz(self.base_quat)[..., 2]
@@ -715,23 +728,19 @@ class G1DeeplocoEnv:
         for env_idx in range(self.num_envs):
             base_pos = self.base_pos[env_idx].cpu().numpy()
             base_quat = self.base_quat[env_idx]
-            # Visualize the entire planned step sequence
             seq = self.step_sequence[env_idx]
             for i, step in enumerate(seq):
-                # Draw all planned footsteps as spheres
                 pos = np.array(step[:3], dtype=np.float32)
-                # Transform to world frame
                 t_world = transform_by_quat(
                     torch.tensor(pos, dtype=gs.tc_float, device=self.device).unsqueeze(0), base_quat.unsqueeze(0)
                 )[0].cpu().numpy() + base_pos
-                t_world[2] = 0.01  # Slightly above ground
-                # Color: gray for all, except current targets
+                t_world[2] = 0.01
                 if i == self.current_step_idx[env_idx]:
-                    color = (0.0, 1.0, 0.0, 0.8)  # Green for current left
+                    color = (0.0, 1.0, 0.0, 0.8)
                 elif i == self.current_step_idx[env_idx] + 1:
-                    color = (0.0, 0.0, 1.0, 0.8)  # Blue for current right
+                    color = (0.0, 0.0, 1.0, 0.8)
                 else:
-                    color = (0.5, 0.5, 0.5, 0.5)  # Gray for others
+                    color = (0.5, 0.5, 0.5, 0.5)
                 self.scene.draw_debug_sphere(
                     pos=t_world,
                     radius=0.025,
@@ -744,7 +753,7 @@ class G1DeeplocoEnv:
                 t_world = transform_by_quat(
                     t_base.unsqueeze(0), base_quat.unsqueeze(0)
                 )[0].cpu().numpy() + base_pos
-                t_world[2] = 0.0  # Ensure arrow is on the ground
+                t_world[2] = 0.0
                 forward_vec_base = torch.tensor([0.15, 0.0, 0.0], device=self.device).unsqueeze(0)
                 forward_vec_world = transform_by_quat(forward_vec_base, base_quat.unsqueeze(0))[0].cpu().numpy()
                 self.scene.draw_debug_arrow(
@@ -753,22 +762,23 @@ class G1DeeplocoEnv:
                     radius=0.01,
                     color=(0.0, 1.0, 0.0, 0.8) if foot == 0 else (0.0, 0.0, 1.0, 0.8)
                 )
-
-    def _visualize_heading(self):
-        self.scene.clear_debug_objects()  # Optional: clear previous arrows
-        for env_idx in range(self.num_envs):
-            base_pos = self.base_pos[env_idx].cpu().numpy()
-            base_quat = self.base_quat[env_idx]
-            # Forward vector in base frame (length 0.3m)
-            forward_vec_base = torch.tensor([0.15, 0.0, 0.0], device=self.device).unsqueeze(0)
-            # Transform to world frame
-            forward_vec_world = transform_by_quat(forward_vec_base, base_quat.unsqueeze(0))[0].cpu().numpy()
-            # Draw arrow
+            # Draw heading arrow at the midpoint between the two current footstep targets
+            midpoint = 0.5 * (self.footstep_targets[env_idx, 0] + self.footstep_targets[env_idx, 1])
+            midpoint[2] = 0.0
+            midpoint_world = transform_by_quat(
+                midpoint.unsqueeze(0), base_quat.unsqueeze(0)
+            )[0].cpu().numpy() + base_pos
+            midpoint_world[2] = 0.02
+            goal_pos = self.goal_pos[env_idx].cpu().numpy()
+            base_xy = self.base_pos[env_idx, :2].cpu().numpy()
+            heading = np.arctan2(goal_pos[1] - base_xy[1], goal_pos[0] - base_xy[0])
+            arrow_vec = np.array([np.cos(heading), np.sin(heading), 0.0]) * 0.5
             self.scene.draw_debug_arrow(
-                pos=base_pos,
-                vec=forward_vec_world,
-                radius=0.01,
-                color=(1.0, 0.0, 0.0, 0.8)  # Red arrow for heading
+                pos=midpoint_world,
+                vec=arrow_vec,
+                radius=0.015,
+                color=(1.0, 0.0, 0.0, 0.8)
             )
 
+    
     
