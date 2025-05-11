@@ -162,17 +162,16 @@ def get_cfgs():
             "gait_contact": 0.5,
             "gait_swing": -0.5,
             "contact_no_vel": -0.5,
-            "feet_swing_height": -8.0,
-            "orientation": -8.0,
+            "feet_swing_height": 2.0,  # Stronger penalty for low foot clearance
+            "orientation": -8.0,  # Stronger penalty for torso roll
             "ang_vel_xy": -1.0,
             "dof_vel": -0.01,
-            "knee_angle": 0.5,
+            "knee_angle": 0.5,  # Increased to encourage slightly bent knees
             "feet_angle": -0.01,
             "goal_progress": 3.0,
-            "footstep_tracking": 8.0,
-            "forward_vel": 1.0,
-            "heading_alignment": 2.0,
-
+            "footstep_tracking": 1.5,
+            "forward_vel": 1.0,  # Lowered to avoid overwhelming other rewards
+            "heading_alignment": 1.0,  # Stronger reward for heading alignment
         }
     }
     command_cfg = {
