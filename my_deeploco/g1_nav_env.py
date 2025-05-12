@@ -187,11 +187,11 @@ class G1DeeplocoEnv:
         self._resample_goals(torch.arange(num_envs, device=self.device))
         self.base_euler = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
         # Initialize step sequence and footstep targets
-        self.step_sequence = [self.plan_step_sequence(idx) for idx in range(self.num_envs)]
+        # self.step_sequence = [self.plan_step_sequence(idx) for idx in range(self.num_envs)]
         self.current_step_idx = [0 for _ in range(self.num_envs)]
         for idx in range(self.num_envs):
             # Set initial footstep_targets to the first two steps in the sequence
-            seq = self.step_sequence[idx]
+            seq = self.plan_step_sequence(idx)
             if len(seq) >= 2:
                 self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
                 self.footstep_targets[idx, 1, :] = torch.tensor(seq[1][:3], device=self.device)
@@ -292,22 +292,30 @@ class G1DeeplocoEnv:
         self.sin_phase = torch.sin(2 * np.pi * self.phase).unsqueeze(1)
         self.cos_phase = torch.cos(2 * np.pi * self.phase).unsqueeze(1)
 
-        # At the end of each gait cycle, update footstep_targets from the step sequence
+        # At the end of each gait cycle, update footstep_targets dynamically
         update_footsteps = (self.episode_length_buf % int(period / self.dt) == 0).nonzero(as_tuple=False).flatten()
         for idx in update_footsteps:
-            curr_idx = self.current_step_idx[idx]
-            seq = self.step_sequence[idx]
-            # Advance to next two steps if possible
-            if curr_idx + 2 < len(seq):
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[curr_idx][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[curr_idx+1][:3], device=self.device)
-                self.current_step_idx[idx] += 2
-            elif curr_idx + 1 < len(seq):
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[curr_idx][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[curr_idx][:3], device=self.device)
-                self.current_step_idx[idx] += 1
-            else:
-                self.footstep_targets[idx, :, :] = 0.0
+            base_pos = self.base_pos[idx, :2].cpu().numpy()
+            goal_pos = self.goal_pos[idx, :2].cpu().numpy()
+            delta = goal_pos - base_pos
+            heading = np.arctan2(delta[1], delta[0])
+            step_length = float(self.env_cfg["step_size"])
+            step_width = float(self.env_cfg["step_gap"])
+            feet_height_target = float(self.env_cfg["feet_height_target"])
+            
+            # Compute next two footsteps based on current heading
+            for foot in range(2):  # 0: left, 1: right
+                stance = 1 if foot == 0 else -1
+                forward = np.array([np.cos(heading), np.sin(heading)])
+                lateral = np.array([-np.sin(heading), np.cos(heading)])
+                step_offset = step_length * forward + stance * (step_width / 2) * lateral
+                step_pos = base_pos + step_offset
+
+                # Convert to PyTorch tensor before assignment
+                self.footstep_targets[idx, foot, 0] = torch.tensor(step_pos[0], device=self.device)
+                self.footstep_targets[idx, foot, 1] = torch.tensor(step_pos[1], device=self.device)
+                self.footstep_targets[idx, foot, 2] = torch.tensor(feet_height_target, device=self.device)
+
 
         # Resample commands (optional, less frequent)
         envs_idx = ((self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt)) == 0).nonzero(as_tuple=False).flatten()
@@ -524,19 +532,6 @@ class G1DeeplocoEnv:
             self.episode_sums[key][envs_idx] = 0.0
         self.phase[envs_idx] = gs_rand_float(0.0, 0.2, (len(envs_idx),), self.device)
         self._resample_goals(envs_idx)
-        # Plan new step sequence and set initial footstep targets
-        for i, idx in enumerate(envs_idx):
-            self.step_sequence[idx] = self.plan_step_sequence(idx)
-            self.current_step_idx[idx] = 0
-            seq = self.step_sequence[idx]
-            if len(seq) >= 2:
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[1][:3], device=self.device)
-            elif len(seq) == 1:
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[0][:3], device=self.device)
-            else:
-                self.footstep_targets[idx, :, :] = 0.0
         self.consecutive_contact_count[envs_idx] = 0
         self.feet_air_time[envs_idx] = 0.0
         self.last_contacts[envs_idx] = False
@@ -728,7 +723,7 @@ class G1DeeplocoEnv:
         for env_idx in range(self.num_envs):
             base_pos = self.base_pos[env_idx].cpu().numpy()
             base_quat = self.base_quat[env_idx]
-            seq = self.step_sequence[env_idx]
+            seq = self.plan_step_sequence(env_idx)
             for i, step in enumerate(seq):
                 pos = np.array(step[:3], dtype=np.float32)
                 t_world = transform_by_quat(
