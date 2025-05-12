@@ -206,8 +206,8 @@ class G1DeeplocoEnv:
         self.env_cfg["step_gap"] = env_cfg.get("step_gap", 0.20)
         self.env_cfg["feet_height_target"] = env_cfg.get("feet_height_target", 0.10)
         self.env_cfg["period"] = env_cfg.get("period", 1.1)
-        self.env_cfg["swing_duration"] = env_cfg.get("swing_duration", 0.45)
-        self.env_cfg["stance_duration"] = env_cfg.get("stance_duration", 0.65)
+        self.env_cfg["swing_duration"] = env_cfg.get("swing_duration", 0.60)
+        self.env_cfg["stance_duration"] = env_cfg.get("stance_duration", 0.50)
 
         self.cfg = {
             "env_cfg": env_cfg,
@@ -226,7 +226,7 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 1] = 0.0  # No lateral velocity
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
-    def plan_step_sequence(self, idx, num_steps=6):
+    def plan_step_sequence(self, idx, num_steps=2):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
         delta = goal_pos - base_pos
@@ -649,15 +649,14 @@ class G1DeeplocoEnv:
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
         for i in range(self.feet_num):
             is_swing = (self.leg_phase[:, i] >= 0.55) & (~contact[:, i])
-            # Compute error in world frame
             target_world = self.base_pos + self.footstep_targets[:, i, :]
-            # Vertical error (height)
             height_error = torch.abs(self.feet_pos[:, i, 2] - target_world[:, 2])
-            # Horizontal error (x, y)
-            horizontal_error = torch.norm(self.feet_pos[:, i, :2] - target_world[:, :2], dim=1)
-            # Combined reward: stronger weight on height
+            error_base = transform_by_quat(self.feet_pos[:, i, :] - target_world, inv_quat(self.base_quat))
+            forward_error = torch.abs(error_base[:, 0])  # x-direction
+            lateral_error = torch.abs(error_base[:, 1])  # y-direction
             footstep_reward += (0.7 * torch.exp(-height_error / 0.05) + 
-                            0.3 * torch.exp(-horizontal_error / 0.3)) * is_swing.float()
+                            0.2 * torch.exp(-forward_error / 0.3) + 
+                            0.1 * torch.exp(-lateral_error / 0.3)) * is_swing.float()
         return footstep_reward
 
     def _reward_goal_progress(self):
@@ -681,6 +680,15 @@ class G1DeeplocoEnv:
         heading_err = torch.min(2 * np.pi - heading_err, heading_err)
         return torch.pow(0.5 * (torch.cos(heading_err) + 1), 4)
 
+    def _reward_minimize_lateral_swing(self):
+        lateral_swing_penalty = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
+        for i in range(self.feet_num):
+            is_swing = (self.leg_phase[:, i] >= 0.55) & (~contact[:, i])
+            foot_vel_base = transform_by_quat(self.feet_vel[:, i, :], inv_quat(self.base_quat))
+            lateral_vel = torch.abs(foot_vel_base[:, 1])  # y-direction
+            lateral_swing_penalty += lateral_vel * is_swing.float()
+        return -lateral_swing_penalty
 
     def _register_reward_functions(self):
         reward_function_names = [
@@ -703,6 +711,7 @@ class G1DeeplocoEnv:
             "goal_progress",
             "forward_vel",
             "heading_alignment",
+            "minimize_lateral_swing",
         ]
         for name in reward_function_names:
             if hasattr(self, f"_reward_{name}"):
