@@ -202,8 +202,8 @@ class G1DeeplocoEnv:
                 self.footstep_targets[idx, :, :] = 0.0
 
         # Add footstep planner parameters with defaults
-        self.env_cfg["step_size"] = env_cfg.get("step_size", 0.15)
-        self.env_cfg["step_gap"] = env_cfg.get("step_gap", 0.25)
+        self.env_cfg["step_size"] = env_cfg.get("step_size", 0.10)
+        self.env_cfg["step_gap"] = env_cfg.get("step_gap", 0.20)
         self.env_cfg["feet_height_target"] = env_cfg.get("feet_height_target", 0.10)
         self.env_cfg["period"] = env_cfg.get("period", 1.1)
         self.env_cfg["swing_duration"] = env_cfg.get("swing_duration", 0.45)
@@ -226,24 +226,21 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 1] = 0.0  # No lateral velocity
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
-    def plan_step_sequence(self, idx, num_steps=2):
+    def plan_step_sequence(self, idx, num_steps=6):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-        # Compute heading toward the goal
         delta = goal_pos - base_pos
         heading = np.arctan2(delta[1], delta[0])
         step_length = float(self.env_cfg["step_size"])
-        step_width = float(self.env_cfg["step_gap"])
+        step_width = float(self.env_cfg["step_gap"]) / 2.0  # Lateral offset for each foot
         feet_height_target = float(self.env_cfg["feet_height_target"])
         sequence = []
         stance = 1  # 1 for left, -1 for right
-        # Start at the current base position
         curr_pos = base_pos.copy()
         for n in range(num_steps):
-            # Step in the heading direction
-            forward = np.array([np.cos(heading), np.sin(heading)])
-            lateral = np.array([-np.sin(heading), np.cos(heading)])
-            step_offset = step_length * forward + stance * (step_width / 2) * lateral
+            forward = np.array([np.cos(heading), np.sin(heading)])  # Only forward direction
+            lateral = np.array([-np.sin(heading), np.cos(heading)])  # Perpendicular to forward
+            step_offset = step_length * forward + stance * step_width * lateral
             curr_pos = curr_pos + step_offset
             sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
             stance *= -1  # Alternate stance
@@ -295,25 +292,27 @@ class G1DeeplocoEnv:
         # At the end of each gait cycle, update footstep_targets dynamically
         update_footsteps = (self.episode_length_buf % int(period / self.dt) == 0).nonzero(as_tuple=False).flatten()
         for idx in update_footsteps:
-            base_pos = self.base_pos[idx, :2].cpu().numpy()
-            goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-            delta = goal_pos - base_pos
-            heading = np.arctan2(delta[1], delta[0])  # Calculate heading towards the goal
-            step_length = float(self.env_cfg["step_size"])
-            step_width = float(self.env_cfg["step_gap"])
-            feet_height_target = float(self.env_cfg["feet_height_target"])
-            
-            # Compute next two footsteps based on current heading
-            for foot in range(2):  # 0: left, 1: right
-                stance = 1 if foot == 0 else -1
-                forward = np.array([np.cos(heading), np.sin(heading)])  # Forward direction
-                step_offset = step_length * forward  # Only forward, no lateral
-                step_pos = base_pos + step_offset
+            # Check distance to current footstep targets
+            dist_to_targets = torch.norm(self.footstep_targets[idx, :, :2] - self.feet_pos[idx, :, :2], dim=1)
+            if torch.all(dist_to_targets < 0.2):  # Only update if close to current targets
+                base_pos = self.base_pos[idx, :2].cpu().numpy()
+                goal_pos = self.goal_pos[idx, :2].cpu().numpy()
+                delta = goal_pos - base_pos
+                heading = np.arctan2(delta[1], delta[0])
+                step_length = float(self.env_cfg["step_size"])
+                step_width = float(self.env_cfg["step_gap"]) / 2.0
+                feet_height_target = float(self.env_cfg["feet_height_target"])
                 
-                # Assign footstep targets
-                self.footstep_targets[idx, foot, 0] = torch.tensor(step_pos[0], device=self.device)
-                self.footstep_targets[idx, foot, 1] = torch.tensor(step_pos[1], device=self.device)
-                self.footstep_targets[idx, foot, 2] = torch.tensor(feet_height_target, device=self.device)
+                for foot in range(2):  # 0: left, 1: right
+                    stance = 1 if foot == 0 else -1
+                    forward = np.array([np.cos(heading), np.sin(heading)])
+                    lateral = np.array([-np.sin(heading), np.cos(heading)])
+                    step_offset = step_length * forward + stance * step_width * lateral
+                    step_pos = base_pos + step_offset
+                    
+                    self.footstep_targets[idx, foot, 0] = torch.tensor(step_pos[0], device=self.device)
+                    self.footstep_targets[idx, foot, 1] = torch.tensor(step_pos[1], device=self.device)
+                    self.footstep_targets[idx, foot, 2] = torch.tensor(feet_height_target, device=self.device)
 
         # Resample commands (optional, less frequent)
         envs_idx = ((self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt)) == 0).nonzero(as_tuple=False).flatten()
@@ -400,6 +399,9 @@ class G1DeeplocoEnv:
         if torch.rand(1).item() < 0.01:  # Print occasionally
             print("T1 left x:", footstep_targets_root[:, 0, 0].cpu().numpy())
             print("T1 right x:", footstep_targets_root[:, 1, 0].cpu().numpy())
+
+        if torch.rand(1).item() < 0.01:
+            print("Base yaw:", self.base_euler[:, 2].cpu().numpy())
 
         return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
 
@@ -662,7 +664,7 @@ class G1DeeplocoEnv:
         # Reward progress towards the goal in the global frame
         prev_dist = torch.norm(self.goal_pos - (self.base_pos[:, :2] - self.base_lin_vel[:, :2] * self.dt), dim=1)
         curr_dist = torch.norm(self.goal_pos - self.base_pos[:, :2], dim=1)
-        return (prev_dist - curr_dist) * 10.0  # Positive if moving closer to goal
+        return (prev_dist - curr_dist) * 5.0  # Positive if moving closer to goal
 
     def _reward_forward_vel(self):
         forward_vel = self.base_lin_vel[:, 0]  # x-direction
