@@ -169,9 +169,9 @@ def get_cfgs():
             "knee_angle": 0.5,  # Increased to encourage slightly bent knees
             "feet_angle": -0.01,
             "goal_progress": 3.0,
-            "footstep_tracking": 1.5,
-            "forward_vel": 1.0,  # Lowered to avoid overwhelming other rewards
-            "heading_alignment": 1.0,  # Stronger reward for heading alignment
+            "footstep_tracking": 2.0,
+            "forward_vel": 0.5,  # Lowered to avoid overwhelming other rewards
+            "heading_alignment": 2.5,  # Stronger reward for heading alignment
         }
     }
     command_cfg = {
