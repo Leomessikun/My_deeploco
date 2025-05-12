@@ -202,9 +202,9 @@ class G1DeeplocoEnv:
                 self.footstep_targets[idx, :, :] = 0.0
 
         # Add footstep planner parameters with defaults
-        self.env_cfg["step_size"] = env_cfg.get("step_size", 0.10)
-        self.env_cfg["step_gap"] = env_cfg.get("step_gap", 0.15)
-        self.env_cfg["feet_height_target"] = env_cfg.get("feet_height_target", 0.075)
+        self.env_cfg["step_size"] = env_cfg.get("step_size", 0.15)
+        self.env_cfg["step_gap"] = env_cfg.get("step_gap", 0.25)
+        self.env_cfg["feet_height_target"] = env_cfg.get("feet_height_target", 0.10)
         self.env_cfg["period"] = env_cfg.get("period", 1.1)
         self.env_cfg["swing_duration"] = env_cfg.get("swing_duration", 0.45)
         self.env_cfg["stance_duration"] = env_cfg.get("stance_duration", 0.65)
@@ -298,7 +298,7 @@ class G1DeeplocoEnv:
             base_pos = self.base_pos[idx, :2].cpu().numpy()
             goal_pos = self.goal_pos[idx, :2].cpu().numpy()
             delta = goal_pos - base_pos
-            heading = np.arctan2(delta[1], delta[0])
+            heading = np.arctan2(delta[1], delta[0])  # Calculate heading towards the goal
             step_length = float(self.env_cfg["step_size"])
             step_width = float(self.env_cfg["step_gap"])
             feet_height_target = float(self.env_cfg["feet_height_target"])
@@ -306,16 +306,14 @@ class G1DeeplocoEnv:
             # Compute next two footsteps based on current heading
             for foot in range(2):  # 0: left, 1: right
                 stance = 1 if foot == 0 else -1
-                forward = np.array([np.cos(heading), np.sin(heading)])
-                lateral = np.array([-np.sin(heading), np.cos(heading)])
-                step_offset = step_length * forward + stance * (step_width / 2) * lateral
+                forward = np.array([np.cos(heading), np.sin(heading)])  # Forward direction
+                step_offset = step_length * forward  # Only forward, no lateral
                 step_pos = base_pos + step_offset
-
-                # Convert to PyTorch tensor before assignment
+                
+                # Assign footstep targets
                 self.footstep_targets[idx, foot, 0] = torch.tensor(step_pos[0], device=self.device)
                 self.footstep_targets[idx, foot, 1] = torch.tensor(step_pos[1], device=self.device)
                 self.footstep_targets[idx, foot, 2] = torch.tensor(feet_height_target, device=self.device)
-
 
         # Resample commands (optional, less frequent)
         envs_idx = ((self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt)) == 0).nonzero(as_tuple=False).flatten()
@@ -549,15 +547,15 @@ class G1DeeplocoEnv:
         self.initial_dir_to_goal[envs_idx] = dir_to_goal
 
     def reset(self):
-            self.reset_buf[:] = True
-            self.reset_idx(torch.arange(self.num_envs, device=self.device))
-            extras = {
+        self.reset_buf[:] = True
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        extras = {
             "observations": {
                 "critic": self.obs_buf,
                 "privileged": None
-                }
             }
-            return self.obs_buf, extras
+        }
+        return self.obs_buf, extras
 
     # --------------------- Reward Functions ---------------------
     def _reward_tracking_lin_vel(self):
@@ -607,7 +605,7 @@ class G1DeeplocoEnv:
         # Sinusoidal height profile: peaks at leg_phase = 0.775 (mid-swing)
         swing_phase = (leg_phase - 0.55) / 0.45  # Normalize to [0, 1] (0.55 to 1.0 is swing)
         swing_phase = torch.clamp(swing_phase, 0.0, 1.0)
-        max_height = 0.075  # Peak height (adjustable)
+        max_height = 0.10  # Peak height (adjustable)
         height = max_height * torch.sin(np.pi * swing_phase)  # Peaks at swing_phase = 0.5
         return height
     

@@ -126,13 +126,13 @@ def get_cfgs():
         "simulation_action_latency": False,
         "clip_actions": 1.0,
         "clip_observations": 10.0,
-        "feet_height_target": 0.075,
+        "feet_height_target": 0.10,
         # New parameters for goal-directed task, updating for new heuristic goal/footstep methods
         "goal_distance_range": [3.0, 10.0],
         "goal_angle_range": [-0.785, 0.785],
         "goal_reached_threshold": 0.2,
-        "step_size": 0.10,
-        "step_gap": 0.20,
+        "step_size": 0.15,
+        "step_gap": 0.25,
         "period": 1.10,
         "swing_duration": 0.45,
         "stance_duration": 0.65,
@@ -151,10 +151,10 @@ def get_cfgs():
     reward_cfg = {
         "tracking_sigma": 0.25,
         "base_height_target": 0.75,
-        "feet_height_target": 0.075,
+        "feet_height_target": 0.10,
         "reward_scales": {
-            "tracking_lin_vel": 0.0,
-            "tracking_ang_vel": 0.0,
+            "tracking_lin_vel": 0.5,
+            "tracking_ang_vel": 0.5,
             "lin_vel_z": -1.0,
             "action_rate": -0.2,
             "base_height": -2.0,
@@ -162,16 +162,16 @@ def get_cfgs():
             "gait_contact": 0.5,
             "gait_swing": -0.5,
             "contact_no_vel": -0.5,
-            "feet_swing_height": 2.0,  # Stronger penalty for low foot clearance
+            "feet_swing_height": 5.0,  # Stronger penalty for low foot clearance
             "orientation": -8.0,  # Stronger penalty for torso roll
             "ang_vel_xy": -1.0,
             "dof_vel": -0.01,
             "knee_angle": 0.5,  # Increased to encourage slightly bent knees
             "feet_angle": -0.01,
-            "goal_progress": 3.0,
+            "goal_progress": 5.0,
             "footstep_tracking": 2.0,
-            "forward_vel": 0.5,  # Lowered to avoid overwhelming other rewards
-            "heading_alignment": 2.5,  # Stronger reward for heading alignment
+            "forward_vel": 0.6,  # Lowered to avoid overwhelming other rewards
+            "heading_alignment": 5.0,  # Stronger reward for heading alignment
         }
     }
     command_cfg = {
