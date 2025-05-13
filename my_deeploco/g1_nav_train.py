@@ -174,6 +174,7 @@ def get_cfgs():
             "heading_alignment": 5.0,  # Stronger reward for heading alignment
             "minimize_lateral_swing": 2.0,  
             "swing_path_alignment": 1.0,
+            "heading_alignment": 1.0,
         }
     }
     command_cfg = {
