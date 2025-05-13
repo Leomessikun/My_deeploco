@@ -187,7 +187,6 @@ class G1DeeplocoEnv:
         self._resample_goals(torch.arange(num_envs, device=self.device))
         self.base_euler = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
         # Initialize step sequence and footstep targets
-        # self.step_sequence = [self.plan_step_sequence(idx) for idx in range(self.num_envs)]
         self.current_step_idx = [0 for _ in range(self.num_envs)]
         for idx in range(self.num_envs):
             # Set initial footstep_targets to the first two steps in the sequence
@@ -226,14 +225,16 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 1] = 0.0  # No lateral velocity
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
-    def plan_step_sequence(self, idx, num_steps=2):
+    def plan_step_sequence(self, idx, num_steps=10):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-        heading = 0.0
-        forward = np.array([1.0, 0.0])  # Always forward
-        lateral = np.array([0.0, 1.0])  # Always left-right in world frame
+        # Compute direction to goal in world frame
+        to_goal = goal_pos - base_pos
+        goal_heading = np.arctan2(to_goal[1], to_goal[0])
+        forward = np.array([np.cos(goal_heading), np.sin(goal_heading)])
+        lateral = np.array([-np.sin(goal_heading), np.cos(goal_heading)])
         step_length = float(self.env_cfg["step_size"])
-        step_width = float(self.env_cfg["step_gap"]) / 2.0  # Lateral offset for each foot
+        step_width = float(self.env_cfg["step_gap"]) / 2.0
         feet_height_target = float(self.env_cfg["feet_height_target"])
         sequence = []
         stance = 1  # 1 for left, -1 for right
@@ -242,7 +243,7 @@ class G1DeeplocoEnv:
             step_offset = step_length * forward + stance * step_width * lateral
             curr_pos = curr_pos + step_offset
             sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
-            stance *= -1  # Alternate stance
+            stance *= -1
         return sequence
 
     def step(self, actions):
@@ -295,22 +296,21 @@ class G1DeeplocoEnv:
             dist_to_targets = torch.norm(self.footstep_targets[idx, :, :2] - self.feet_pos[idx, :, :2], dim=1)
             if torch.all(dist_to_targets < 0.2):  # Only update if close to current targets
                 # Increment the current step index
-                self.current_step_idx[idx] += 1  # Increment the step index
-                
-                # Ensure the index does not exceed the number of steps
-                if self.current_step_idx[idx] >= len(self.plan_step_sequence(idx)):
-                    self.current_step_idx[idx] = 0  # Reset or handle as needed
+                self.current_step_idx[idx] = (self.current_step_idx[idx] + 1) % len(self.plan_step_sequence(idx))
 
+                # Use goal-based footstep planning
                 base_pos = self.base_pos[idx, :2].cpu().numpy()
                 goal_pos = self.goal_pos[idx, :2].cpu().numpy()
+                to_goal = goal_pos - base_pos
+                goal_heading = np.arctan2(to_goal[1], to_goal[0])
+                forward = np.array([np.cos(goal_heading), np.sin(goal_heading)])
+                lateral = np.array([-np.sin(goal_heading), np.cos(goal_heading)])
                 step_length = float(self.env_cfg["step_size"])
                 step_width = float(self.env_cfg["step_gap"]) / 2.0
                 feet_height_target = float(self.env_cfg["feet_height_target"])
-                
+
                 for foot in range(2):  # 0: left, 1: right
                     stance = 1 if foot == 0 else -1
-                    forward = np.array([1.0, 0.0])
-                    lateral = np.array([0.0, 1.0])
                     step_offset = step_length * forward + stance * step_width * lateral
                     step_pos = base_pos + step_offset
                     
@@ -330,7 +330,8 @@ class G1DeeplocoEnv:
         self.links_pos = self.robot.get_links_pos()
         self.feet_pos = self.links_pos[:, self.feet_indices, :]
         self.pelvis_pos = self.links_pos[:, self.pelvis_id_local, :]
-        self.reset_buf = (self.episode_length_buf > self.max_episode_length) & (self.episode_length_buf > 100)
+        self.reset_buf = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        self.reset_buf |= (self.episode_length_buf > self.max_episode_length) & (self.episode_length_buf > 100)
         self.reset_buf |= (self.pelvis_pos[:, 2] < self.env_cfg["termination_if_pelvis_z_less_than"]) & (self.episode_length_buf > 100)
         self.reset_buf |= goal_reached  # Reset on goal reached
         termination_contacts = torch.any(self.contact_forces[:, self.termination_contact_indices, 2] > 60.0, dim=1)
@@ -698,6 +699,13 @@ class G1DeeplocoEnv:
             alignment_reward += cosine_sim * is_swing.float()
         return alignment_reward
 
+    def _reward_heading_alignment(self):
+        to_goal = self.goal_pos - self.base_pos[:, :2]
+        goal_heading = torch.atan2(to_goal[:, 1], to_goal[:, 0])
+        current_heading = self.base_euler[:, 2]
+        heading_error = torch.abs((goal_heading - current_heading + np.pi) % (2 * np.pi) - np.pi)
+        return torch.exp(-heading_error / 0.2)
+
     def _register_reward_functions(self):
         reward_function_names = [
             #"tracking_lin_vel",
@@ -720,6 +728,7 @@ class G1DeeplocoEnv:
             "forward_vel",
             "minimize_lateral_swing",
             "swing_path_alignment",
+            "heading_alignment",
         ]
         for name in reward_function_names:
             if hasattr(self, f"_reward_{name}"):
@@ -757,27 +766,6 @@ class G1DeeplocoEnv:
                     pos=t_world,
                     radius=0.025,
                     color=color
-                )
-            # Draw arrows for current footstep targets
-            for foot in range(2):
-                t_base = self.footstep_targets[env_idx, foot].clone()
-                t_base[2] = 0.0
-                t_world = transform_by_quat(
-                    t_base.unsqueeze(0), base_quat.unsqueeze(0)
-                )[0].cpu().numpy() + base_pos
-                t_world[2] = 0.0
-                arrow_vec = t_world - base_pos
-                arrow_vec[2] = 0.0  # Only in the horizontal plane
-                norm = np.linalg.norm(arrow_vec)
-                if norm > 1e-6:
-                    arrow_vec = 0.5 * arrow_vec / norm  # Scale to length 0.5
-                else:
-                    arrow_vec = np.array([0.5, 0.0])
-                self.scene.draw_debug_arrow(
-                    pos=t_world,
-                    vec=arrow_vec,
-                    radius=0.01,
-                    color=(0.0, 1.0, 0.0, 0.8) if foot == 0 else (0.0, 0.0, 1.0, 0.8)
                 )
                 
             ## Draw heading arrow at the midpoint between the two current footstep targets
