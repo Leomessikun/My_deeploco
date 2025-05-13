@@ -42,7 +42,7 @@ def add_metrics_tracking(env):
         "lateral_velocity": [],
         "angular_velocity": [],
         "alternating_contacts": [],
-        "feet_air_time": [],
+        #"feet_air_time": [],
         "torso_roll": [],
         "torso_pitch": []
     }
@@ -82,7 +82,7 @@ def add_metrics_tracking(env):
             mean_alternating = torch.mean(alternating).item()
             
             # Feet air time - average time feet spend in air
-            mean_air_time = torch.mean(self.feet_air_time).item()
+            # mean_air_time = torch.mean(self.feet_air_time).item()
             
             # Torso orientation
             mean_roll = torch.mean(torch.abs(self.base_euler[:, 0])).item()  # Roll (lateral tilt)
@@ -96,7 +96,7 @@ def add_metrics_tracking(env):
             self.metrics["lateral_velocity"].append(mean_lateral_vel)
             self.metrics["angular_velocity"].append(mean_angular_vel)
             self.metrics["alternating_contacts"].append(mean_alternating)
-            self.metrics["feet_air_time"].append(mean_air_time)
+            #self.metrics["feet_air_time"].append(mean_air_time)
             self.metrics["torso_roll"].append(mean_roll)
             self.metrics["torso_pitch"].append(mean_pitch)
             
@@ -108,7 +108,7 @@ def add_metrics_tracking(env):
                       f"angular={sum(self.metrics['angular_velocity'][-50:]) / 50:.3f} rad/s")
                 print(f"  Gait: clearance={sum(self.metrics['foot_clearance'][-50:]) / 50:.3f} m, "
                       f"step length={sum(self.metrics['step_length'][-50:]) / 50:.3f} m, "
-                      f"air time={sum(self.metrics['feet_air_time'][-50:]) / 50:.3f} s, "
+                      #f"air time={sum(self.metrics['feet_air_time'][-50:]) / 50:.3f} s, "
                       f"alternating={sum(self.metrics['alternating_contacts'][-50:]) / 50:.3f}")
                 print(f"  Stability: height={sum(self.metrics['base_height'][-50:]) / 50:.3f} m, "
                       f"roll={sum(self.metrics['torso_roll'][-50:]) / 50:.3f} rad, "
@@ -233,8 +233,6 @@ def main():
             
             if hasattr(env, '_visualize_footstep_targets'):
                 env._visualize_footstep_targets()
-            if hasattr(env, '_visualize_heading'):
-                env._visualize_heading()
             
             step_count += 1
             elapsed_time = time.time() - start_time
