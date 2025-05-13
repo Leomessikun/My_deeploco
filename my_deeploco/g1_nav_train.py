@@ -132,7 +132,7 @@ def get_cfgs():
         "goal_angle_range": [-0.785, 0.785],
         "goal_reached_threshold": 0.2,
         "step_size": 0.10,
-        "step_gap": 0.08,
+        "step_gap": 0.20,
         "period": 1.10,
         "swing_duration": 0.6,
         "stance_duration": 0.5,
@@ -172,7 +172,8 @@ def get_cfgs():
             "footstep_tracking": 5.0,
             "forward_vel": 5.0,
             "heading_alignment": 5.0,  # Stronger reward for heading alignment
-            "minimize_lateral_swing": -2.0,  # Negative to penalize lateral motion
+            "minimize_lateral_swing": 2.0,  
+            "swing_path_alignment": 1.0,
         }
     }
     command_cfg = {

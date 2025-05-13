@@ -229,8 +229,9 @@ class G1DeeplocoEnv:
     def plan_step_sequence(self, idx, num_steps=2):
         base_pos = self.base_pos[idx, :2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-        delta = goal_pos - base_pos
-        heading = np.arctan2(delta[1], delta[0])
+        heading = 0.0
+        forward = np.array([1.0, 0.0])  # Always forward
+        lateral = np.array([0.0, 1.0])  # Always left-right in world frame
         step_length = float(self.env_cfg["step_size"])
         step_width = float(self.env_cfg["step_gap"]) / 2.0  # Lateral offset for each foot
         feet_height_target = float(self.env_cfg["feet_height_target"])
@@ -238,8 +239,6 @@ class G1DeeplocoEnv:
         stance = 1  # 1 for left, -1 for right
         curr_pos = base_pos.copy()
         for n in range(num_steps):
-            forward = np.array([np.cos(heading), np.sin(heading)])  # Only forward direction
-            lateral = np.array([-np.sin(heading), np.cos(heading)])  # Perpendicular to forward
             step_offset = step_length * forward + stance * step_width * lateral
             curr_pos = curr_pos + step_offset
             sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
@@ -280,7 +279,7 @@ class G1DeeplocoEnv:
         self.dof_pos[:] = self.robot.get_dofs_position(self.motor_dofs)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motor_dofs)
 
-        period = 1.0
+        period = 1.1
         self.phase = (self.episode_length_buf * self.dt) % period / period
         self.left_stance = self.phase < 0.5
         self.right_stance = self.phase >= 0.5
@@ -295,18 +294,23 @@ class G1DeeplocoEnv:
             # Check distance to current footstep targets
             dist_to_targets = torch.norm(self.footstep_targets[idx, :, :2] - self.feet_pos[idx, :, :2], dim=1)
             if torch.all(dist_to_targets < 0.2):  # Only update if close to current targets
+                # Increment the current step index
+                self.current_step_idx[idx] += 1  # Increment the step index
+                
+                # Ensure the index does not exceed the number of steps
+                if self.current_step_idx[idx] >= len(self.plan_step_sequence(idx)):
+                    self.current_step_idx[idx] = 0  # Reset or handle as needed
+
                 base_pos = self.base_pos[idx, :2].cpu().numpy()
                 goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-                delta = goal_pos - base_pos
-                heading = np.arctan2(delta[1], delta[0])
                 step_length = float(self.env_cfg["step_size"])
                 step_width = float(self.env_cfg["step_gap"]) / 2.0
                 feet_height_target = float(self.env_cfg["feet_height_target"])
                 
                 for foot in range(2):  # 0: left, 1: right
                     stance = 1 if foot == 0 else -1
-                    forward = np.array([np.cos(heading), np.sin(heading)])
-                    lateral = np.array([-np.sin(heading), np.cos(heading)])
+                    forward = np.array([1.0, 0.0])
+                    lateral = np.array([0.0, 1.0])
                     step_offset = step_length * forward + stance * step_width * lateral
                     step_pos = base_pos + step_offset
                     
@@ -670,16 +674,6 @@ class G1DeeplocoEnv:
         lateral_vel = self.base_lin_vel[:, 1]  # y-direction
         return torch.exp(-torch.square(forward_vel - 0.3)) - torch.square(lateral_vel)
 
-    def _reward_heading_alignment(self):
-        # Get current yaw
-        base_yaw = quat_to_xyz(self.base_quat)[..., 2]
-        # Direction to goal
-        to_goal = self.goal_pos - self.base_pos[:, :2]
-        goal_yaw = torch.atan2(to_goal[:, 1], to_goal[:, 0])
-        heading_err = torch.abs(base_yaw - goal_yaw)
-        heading_err = torch.min(2 * np.pi - heading_err, heading_err)
-        return torch.pow(0.5 * (torch.cos(heading_err) + 1), 4)
-
     def _reward_minimize_lateral_swing(self):
         lateral_swing_penalty = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
@@ -689,6 +683,20 @@ class G1DeeplocoEnv:
             lateral_vel = torch.abs(foot_vel_base[:, 1])  # y-direction
             lateral_swing_penalty += lateral_vel * is_swing.float()
         return -lateral_swing_penalty
+
+    def _reward_swing_path_alignment(self):
+        alignment_reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 0.5
+        for i in range(self.feet_num):
+            is_swing = (self.leg_phase[:, i] >= 0.55) & (~contact[:, i])
+            foot_vel_base = transform_by_quat(self.feet_vel[:, i, :], inv_quat(self.base_quat))
+            vel_norm = torch.norm(foot_vel_base, dim=1, keepdim=True)
+            vel_norm = torch.where(vel_norm > 1e-6, vel_norm, torch.ones_like(vel_norm))
+            vel_dir = foot_vel_base / vel_norm
+            forward_dir = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+            cosine_sim = torch.sum(vel_dir * forward_dir, dim=1)
+            alignment_reward += cosine_sim * is_swing.float()
+        return alignment_reward
 
     def _register_reward_functions(self):
         reward_function_names = [
@@ -710,8 +718,8 @@ class G1DeeplocoEnv:
             "footstep_tracking",
             "goal_progress",
             "forward_vel",
-            "heading_alignment",
             "minimize_lateral_swing",
+            "swing_path_alignment",
         ]
         for name in reward_function_names:
             if hasattr(self, f"_reward_{name}"):
@@ -740,9 +748,9 @@ class G1DeeplocoEnv:
                 )[0].cpu().numpy() + base_pos
                 t_world[2] = 0.01
                 if i == self.current_step_idx[env_idx]:
-                    color = (0.0, 1.0, 0.0, 0.8)
+                    color = (0.0, 1.0, 0.0, 0.8)  # Green
                 elif i == self.current_step_idx[env_idx] + 1:
-                    color = (0.0, 0.0, 1.0, 0.8)
+                    color = (0.0, 0.0, 1.0, 0.8)  # Blue
                 else:
                     color = (0.5, 0.5, 0.5, 0.5)
                 self.scene.draw_debug_sphere(
@@ -758,15 +766,21 @@ class G1DeeplocoEnv:
                     t_base.unsqueeze(0), base_quat.unsqueeze(0)
                 )[0].cpu().numpy() + base_pos
                 t_world[2] = 0.0
-                forward_vec_base = torch.tensor([0.15, 0.0, 0.0], device=self.device).unsqueeze(0)
-                forward_vec_world = transform_by_quat(forward_vec_base, base_quat.unsqueeze(0))[0].cpu().numpy()
+                arrow_vec = t_world - base_pos
+                arrow_vec[2] = 0.0  # Only in the horizontal plane
+                norm = np.linalg.norm(arrow_vec)
+                if norm > 1e-6:
+                    arrow_vec = 0.5 * arrow_vec / norm  # Scale to length 0.5
+                else:
+                    arrow_vec = np.array([0.5, 0.0])
                 self.scene.draw_debug_arrow(
                     pos=t_world,
-                    vec=forward_vec_world,
+                    vec=arrow_vec,
                     radius=0.01,
                     color=(0.0, 1.0, 0.0, 0.8) if foot == 0 else (0.0, 0.0, 1.0, 0.8)
                 )
-            # Draw heading arrow at the midpoint between the two current footstep targets
+                
+            ## Draw heading arrow at the midpoint between the two current footstep targets
             midpoint = 0.5 * (self.footstep_targets[env_idx, 0] + self.footstep_targets[env_idx, 1])
             midpoint[2] = 0.0
             midpoint_world = transform_by_quat(
