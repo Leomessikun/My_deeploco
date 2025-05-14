@@ -3,6 +3,8 @@ import math
 import numpy as np
 import genesis as gs
 from genesis.utils.geom import quat_to_xyz, xyz_to_quat, transform_by_quat, inv_quat, transform_quat_by_quat
+import os
+from datetime import datetime
 
 def gs_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
@@ -76,6 +78,13 @@ class G1DeeplocoEnv:
                 pos=self.base_init_pos.cpu().numpy(),
                 quat=self.base_init_quat.cpu().numpy(),
             )
+        )
+        self.cam = self.scene.add_camera(
+            res=(640, 480),
+            pos=(3.5, 0.0, 2.5),
+            lookat=(0, 0, 0.5),
+            fov=60,
+            GUI=True,  # <-- This enables the camera viewer window and hotkey support
         )
         self.scene.build(n_envs=num_envs)
 
@@ -191,6 +200,9 @@ class G1DeeplocoEnv:
         self.last_contacts = torch.zeros((num_envs, 2), device=self.device, dtype=torch.bool)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         
+        self.is_recording = False  # Track recording state
+        self.video_recorder = None  # Initialize video recorder
+
     def _resample_commands(self, envs_idx):
         # Use the new flat range keys from command_cfg
         self.commands[envs_idx, 0] = gs_rand_float(*self.command_cfg["lin_vel_x_range"], (len(envs_idx),), self.device)
@@ -203,6 +215,7 @@ class G1DeeplocoEnv:
         target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos        
         self.robot.control_dofs_position(target_dof_pos, self.motor_dofs)
         self.scene.step()
+        self.cam.render()  # This updates the camera view and allows recording
 
         # Update contact forces after the simulation step
         self.contact_forces = self.robot.get_links_net_contact_force()
@@ -600,3 +613,5 @@ class G1DeeplocoEnv:
 
     def close(self):
         print("Environment closed.")
+
+    

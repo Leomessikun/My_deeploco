@@ -50,6 +50,8 @@ def get_train_cfg(exp_name, max_iterations):
         "empirical_normalization": False,
         "num_steps_per_env": 24,
         "seed": 1,
+        "logger": "wandb",
+        "wandb_project": "g1-deeploco-goal",
     }
 
     return train_cfg_dict
@@ -126,8 +128,8 @@ def get_cfgs():
         "episode_length_s": 20.0,
         "resampling_time_s": 10.0,
         "simulation_action_latency": False,
-        "clip_actions": 100.0,
-        "clip_observations": 100.0,
+        "clip_actions": 1.0,
+        "clip_observations": 10.0,
         "feet_height_target": 0.085,  
     }
     obs_cfg = {
@@ -242,6 +244,22 @@ def main():
         [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg, domain_rand_cfg],
         open(f"{log_dir}/cfgs.pkl", "wb"),
     )
+
+    # Example loop to control recording
+    while True:
+        # Check for user input or specific conditions
+        user_input = input("Press 'R' to toggle recording, 'Q' to quit: ")
+        if user_input.lower() == 'r':
+            if env.is_recording:
+                env.stop_recording()
+            else:
+                env.start_recording()
+        elif user_input.lower() == 'q':
+            break
+
+        # Run your simulation step
+        actions = env.get_actions()  # Replace with your action retrieval logic
+        env.step(actions)  # This will now include rendering
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
