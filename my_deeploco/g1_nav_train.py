@@ -170,11 +170,10 @@ def get_cfgs():
             "feet_angle": -0.01,
             "goal_progress": 10.0,
             "footstep_tracking": 5.0,
-            "forward_vel": 5.0,
-            "heading_alignment": 5.0,  # Stronger reward for heading alignment
+            "forward_vel": 1.0,  # Lowered
+            "heading_alignment": 10.0,  # Stronger
             "minimize_lateral_swing": 2.0,  
             "swing_path_alignment": 1.0,
-            "heading_alignment": 1.0,
         }
     }
     command_cfg = {
@@ -250,6 +249,22 @@ def main():
         [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg, domain_rand_cfg],
         open(f"{log_dir}/cfgs.pkl", "wb"),
     )
+
+    # Example loop to control recording
+    while True:
+        # Check for user input or specific conditions
+        user_input = input("Press 'R' to toggle recording, 'Q' to quit: ")
+        if user_input.lower() == 'r':
+            if env.is_recording:
+                env.stop_recording()
+            else:
+                env.start_recording()
+        elif user_input.lower() == 'q':
+            break
+
+        # Run your simulation step
+        actions = env.get_actions()  # Replace with your action retrieval logic
+        env.step(actions)  # This will now include rendering
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 

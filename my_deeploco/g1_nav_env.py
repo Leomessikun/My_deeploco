@@ -67,6 +67,14 @@ class G1DeeplocoEnv:
                 quat=self.base_init_quat.cpu().numpy(),
             )
         )
+
+        self.cam = self.scene.add_camera(
+            res=(640, 480),
+            pos=(3.5, 0.0, 2.5),
+            lookat=(0, 0, 0.5),
+            fov=60,
+            GUI=True,  # Enables the camera viewer window and hotkey support
+        )
         self.scene.build(n_envs=num_envs)
 
         # Joint setup 
@@ -188,17 +196,6 @@ class G1DeeplocoEnv:
         self.base_euler = torch.zeros((num_envs, 3), device=self.device, dtype=gs.tc_float)
         # Initialize step sequence and footstep targets
         self.current_step_idx = [0 for _ in range(self.num_envs)]
-        for idx in range(self.num_envs):
-            # Set initial footstep_targets to the first two steps in the sequence
-            seq = self.plan_step_sequence(idx)
-            if len(seq) >= 2:
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[1][:3], device=self.device)
-            elif len(seq) == 1:
-                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
-                self.footstep_targets[idx, 1, :] = torch.tensor(seq[0][:3], device=self.device)
-            else:
-                self.footstep_targets[idx, :, :] = 0.0
 
         # Add footstep planner parameters with defaults
         self.env_cfg["step_size"] = env_cfg.get("step_size", 0.10)
@@ -216,6 +213,25 @@ class G1DeeplocoEnv:
             "domain_rand_cfg": domain_rand_cfg,
         }
 
+        self.footstep_sequences = [[] for _ in range(self.num_envs)]
+        self.current_footstep_idx = [[0, 1] for _ in range(self.num_envs)]
+        
+        for idx in range(self.num_envs):
+            seq = self.plan_step_sequence(idx)
+            # Set initial footstep_targets to the first two steps
+            if len(seq) >= 2:
+                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
+                self.footstep_targets[idx, 1, :] = torch.tensor(seq[1][:3], device=self.device)
+            elif len(seq) == 1:
+                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
+                self.footstep_targets[idx, 1, :] = torch.tensor(seq[0][:3], device=self.device)
+            else:
+                self.footstep_targets[idx, :, :] = 0.0
+
+
+        self.is_recording = False
+        self.video_recorder = None  # Initialize video recorder
+
     def _resample_goals(self, envs_idx):
         self.goal_pos[envs_idx, 0] = self.base_pos[envs_idx, 0] + 50.0  # Far ahead
         self.goal_pos[envs_idx, 1] = self.base_pos[envs_idx, 1]  # No lateral offset
@@ -226,9 +242,9 @@ class G1DeeplocoEnv:
         self.commands[envs_idx, 2] = 0.0  # No angular velocity
 
     def plan_step_sequence(self, idx, num_steps=10):
-        base_pos = self.base_pos[idx, :2].cpu().numpy()
+        # Use the initial base position and heading
+        base_pos = self.base_init_pos[:2].cpu().numpy()
         goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-        # Compute direction to goal in world frame
         to_goal = goal_pos - base_pos
         goal_heading = np.arctan2(to_goal[1], to_goal[0])
         forward = np.array([np.cos(goal_heading), np.sin(goal_heading)])
@@ -244,6 +260,7 @@ class G1DeeplocoEnv:
             curr_pos = curr_pos + step_offset
             sequence.append([curr_pos[0], curr_pos[1], feet_height_target, 0.0])
             stance *= -1
+        self.footstep_sequences[idx] = sequence
         return sequence
 
     def step(self, actions):
@@ -292,31 +309,18 @@ class G1DeeplocoEnv:
         # At the end of each gait cycle, update footstep_targets dynamically
         update_footsteps = (self.episode_length_buf % int(period / self.dt) == 0).nonzero(as_tuple=False).flatten()
         for idx in update_footsteps:
-            # Check distance to current footstep targets
-            dist_to_targets = torch.norm(self.footstep_targets[idx, :, :2] - self.feet_pos[idx, :, :2], dim=1)
-            if torch.all(dist_to_targets < 0.2):  # Only update if close to current targets
-                # Increment the current step index
-                self.current_step_idx[idx] = (self.current_step_idx[idx] + 1) % len(self.plan_step_sequence(idx))
-
-                # Use goal-based footstep planning
-                base_pos = self.base_pos[idx, :2].cpu().numpy()
-                goal_pos = self.goal_pos[idx, :2].cpu().numpy()
-                to_goal = goal_pos - base_pos
-                goal_heading = np.arctan2(to_goal[1], to_goal[0])
-                forward = np.array([np.cos(goal_heading), np.sin(goal_heading)])
-                lateral = np.array([-np.sin(goal_heading), np.cos(goal_heading)])
-                step_length = float(self.env_cfg["step_size"])
-                step_width = float(self.env_cfg["step_gap"]) / 2.0
-                feet_height_target = float(self.env_cfg["feet_height_target"])
-
-                for foot in range(2):  # 0: left, 1: right
-                    stance = 1 if foot == 0 else -1
-                    step_offset = step_length * forward + stance * step_width * lateral
-                    step_pos = base_pos + step_offset
-                    
-                    self.footstep_targets[idx, foot, 0] = torch.tensor(step_pos[0], device=self.device)
-                    self.footstep_targets[idx, foot, 1] = torch.tensor(step_pos[1], device=self.device)
-                    self.footstep_targets[idx, foot, 2] = torch.tensor(feet_height_target, device=self.device)
+            for foot in range(2):  # 0: left, 1: right
+                target_idx = self.current_footstep_idx[idx][foot]
+                target = self.footstep_sequences[idx][target_idx]
+                foot_pos = self.feet_pos[idx, foot, :2].cpu().numpy()
+                dist = np.linalg.norm(foot_pos - np.array(target[:2]))
+                if dist < 0.1:  # Threshold for "reaching" the footstep
+                    # Advance to next step for this foot
+                    self.current_footstep_idx[idx][foot] = min(target_idx + 2, len(self.footstep_sequences[idx]) - 1)
+            # Update footstep_targets buffer for observation (next two steps)
+            for foot in range(2):
+                target_idx = self.current_footstep_idx[idx][foot]
+                self.footstep_targets[idx, foot, :] = torch.tensor(self.footstep_sequences[idx][target_idx][:3], device=self.device)
 
         # Resample commands (optional, less frequent)
         envs_idx = ((self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt)) == 0).nonzero(as_tuple=False).flatten()
@@ -407,6 +411,22 @@ class G1DeeplocoEnv:
 
         if torch.rand(1).item() < 0.01:
             print("Base yaw:", self.base_euler[:, 2].cpu().numpy())
+
+        # Transform footstep targets (world) to base frame for observation
+        footstep_targets_base = []
+        for idx in range(self.num_envs):
+            base_pos = self.base_pos[idx, :3]
+            base_quat = self.base_quat[idx]
+            targets = []
+            for foot in range(2):
+                target_world = self.footstep_targets[idx, foot, :]
+                rel = target_world - base_pos
+                rel_base = transform_by_quat(rel.unsqueeze(0), inv_quat(base_quat.unsqueeze(0)))[0]
+                targets.append(rel_base)
+            footstep_targets_base.append(torch.stack(targets))
+        footstep_targets_base = torch.stack(footstep_targets_base)
+
+        self.cam.render()  # This updates the camera view and allows recording
 
         return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
 
@@ -552,6 +572,19 @@ class G1DeeplocoEnv:
         else:
             dir_to_goal = torch.tensor([1.0, 0.0], device=self.device)
         self.initial_dir_to_goal[envs_idx] = dir_to_goal
+
+        for idx in envs_idx:
+            seq = self.plan_step_sequence(idx)
+            self.current_footstep_idx[idx] = [0, 1]
+            # Set initial footstep_targets to the first two steps
+            if len(seq) >= 2:
+                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
+                self.footstep_targets[idx, 1, :] = torch.tensor(seq[1][:3], device=self.device)
+            elif len(seq) == 1:
+                self.footstep_targets[idx, 0, :] = torch.tensor(seq[0][:3], device=self.device)
+                self.footstep_targets[idx, 1, :] = torch.tensor(seq[0][:3], device=self.device)
+            else:
+                self.footstep_targets[idx, :, :] = 0.0
 
     def reset(self):
         self.reset_buf[:] = True
